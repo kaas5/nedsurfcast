@@ -52,7 +52,6 @@ def plot_pressure(ax, ds_t, land_mask, lon, lat):
     r = 30
     step = 0.002
     levels = [1.0 - step * (r / 2) + i * step for i in range(r)]
-    print(levels)
  
     mesh = ax.pcolormesh(lon, lat, msl, shading="auto", cmap="viridis")
     ax.contour(lon, lat, msl, levels=levels, colors="grey", alpha=1.0, linewidths=1.0)

@@ -30,7 +30,7 @@ def download_cmems_wave_example():
     """Example Copernicus Marine Toolbox call for the North West Shelf
     WW3 reanalysis product. Requires `copernicusmarine login` once."""
     import copernicusmarine
-    copernicusmarine.login(username='kaas5', password='Deens8356!')
+    copernicusmarine.login(username='', password='')
  
     copernicusmarine.subset(
         dataset_id="MetO-NWS-WAV-RAN",  # example North West Shelf WW3 hindcast dataset id — verify current id on CMEMS catalog
