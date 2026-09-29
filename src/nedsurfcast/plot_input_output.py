@@ -48,9 +48,15 @@ def add_coastline(ax, lon, lat, land_mask):
  
 def plot_pressure(ax, ds_t, land_mask, lon, lat):
     msl = ds_t["msl"].values
+
+    r = 30
+    step = 0.002
+    levels = [1.0 - step * (r / 2) + i * step for i in range(r)]
+    print(levels)
  
     mesh = ax.pcolormesh(lon, lat, msl, shading="auto", cmap="viridis")
-    plt.colorbar(mesh, ax=ax, label="Wind speed (m/s)", fraction=0.046, pad=0.04)
+    ax.contour(lon, lat, msl, levels=levels, colors="grey", alpha=1.0, linewidths=1.0)
+    plt.colorbar(mesh, ax=ax, label="Pressure (atm)", fraction=0.046, pad=0.04)
 
     add_coastline(ax, lon, lat, land_mask)
     ax.set_title("Input: mean sea level pressure")
