@@ -1,0 +1,43 @@
+[project]
+name = "nedsurfcast"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { email = "" }
+]
+requires-python = "==3.10.21"
+dependencies = [
+    "cdsapi>=0.7.7",
+    "copernicusmarine>=2.3.0",
+    "dask>=2026.8.0",
+    "matplotlib>=3.10.9",
+    "netcdf4>=1.7.3",
+    "numpy<2.0",
+    "scipy>=1.15.3",
+    "torch==1.13.1",
+    "xarray>=2025.6.1",
+    "zarr<3",
+]
+
+[project.scripts]
+nedsurfcast = "nedsurfcast:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'"
+]
+
+[tool.uv.sources]
+torch = [
+    { index="pytorch", marker = "sys_platform == 'win32' and platform_machine == 'AMD64'"}
+]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu116"
+explicit = true
