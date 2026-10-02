@@ -97,6 +97,11 @@ def plot_wave_size_direction(ax, ds_t, land_mask, lon, lat, quiver_stride: int =
 
     mesh = ax.pcolormesh(lon, lat, wave_size, shading="auto", cmap="viridis", vmin=0.0)
     plt.colorbar(mesh, ax=ax, label="Wave size (m)", fraction=0.046, pad=0.04)
+
+    buoy_lat, buoy_lon = 53.52612, 6.03565
+    nearest_cell = ds_t.sel(lat=buoy_lat, lon=buoy_lon, method="nearest")
+    print("Matched grid cell:", nearest_cell.lat.values, nearest_cell.lon.values)
+    plt.scatter([buoy_lon], [buoy_lat], c='blue')
  
     # Sparse quiver arrows so the plot stays readable regardless of grid size
     if quiver_stride is None:

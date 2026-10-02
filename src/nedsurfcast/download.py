@@ -43,6 +43,8 @@ def download_cmems_wave_example():
         output_directory=str(cfg.RAW_DIR),
     )
 
+# Buoy data kan alleen handmatig: https://waterinfo.rws.nl/
+
 if __name__=='__main__':
     #download_era5_wind_example()
     download_cmems_wave_example()
