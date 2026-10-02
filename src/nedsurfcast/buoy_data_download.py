@@ -38,9 +38,10 @@ def get_data(location, start_date, end_date, dir_output, overwrite=True):
     # convert to xarray: constant columns are converted to attributes to save disk space
     # except the columns in always_preserve
     always_preserve = [
-        "WaarnemingMetadata.Statuswaarde",
-        "WaarnemingMetadata.Kwaliteitswaardecode",
-        "WaardeBepalingsMethode.Code",
+        #"WaarnemingMetadata.Statuswaarde",
+        #"WaarnemingMetadata.Kwaliteitswaardecode",
+        #"WaardeBepalingsMethode.Code",
+        "Grootheid.Code",
         "Meetwaarde.Waarde_Numeriek",
     ]
     ds = ddlpy.dataframe_to_xarray(measurements, always_preserve=always_preserve)
@@ -54,21 +55,18 @@ if __name__ == "__main__":
 
     # get locations
     locations = ddlpy.locations()
-    bool_stations = locations.index.isin(["ijmuiden.buitenhaven", "dantziggat.zuid", "hoekvanholland", "ameland.nes"])
-    bool_procestype = locations["ProcesType"].isin(["meting"])  # meting/astronomisch/verwachting
-    bool_grootheid = locations["Grootheid.Code"].isin(["Hm0", "", ""])  # waterlevel (WATHTE)
-    bool_groepering = locations["Groepering.Code"].isin([""])  # timeseries ("") versus extremes (GETETM2/GETETMSL2/GETETBRKD2/GETETBRKDMSL2)
-    bool_hoedanigheid = locations["Hoedanigheid.Code"].isin(["NAP"])  # vertical reference (NAP/MSL)
+    bool_stations = locations.index.isin(['ijmuiden.munitiestort.3', 'ijgeul.2', 'europlatform'])
+    bool_grootheid = locations["Grootheid.Code"].isin(["Hm0", "Tm01", "Th0"]) # ["Hm0", "Tm01", "Th0"] golfhoogte, golfperiode, golfrichting
+    bool_groepering = locations['Groepering.Code'].isin(['']) # timeseries ("") versus extremes (GETETM2/GETETMSL2/GETETBRKD2/GETETBRKDMSL2)
+    #bool_hoedanigheid = locations['Hoedanigheid.Code'].isin(['NAP']) # vertical reference (NAP/MSL)
     selected = locations.loc[
-        bool_stations
-        & bool_procestype
-        & bool_grootheid
-        & bool_groepering
-        & bool_hoedanigheid
+        #bool_stations &
+        bool_grootheid &
+        bool_groepering
     ]
 
     start_date = dt.datetime(2023, 1, 1)
-    end_date = dt.datetime(2023, 1, 15)
+    end_date = dt.datetime(2023, 1, 10)
 
     # normal code
     # for station_code, location in selected.iterrows():
@@ -88,3 +86,4 @@ if __name__ == "__main__":
         ds["Meetwaarde.Waarde_Numeriek"].plot(ax=ax, label=f"{station_code} ({station_naam})")
         ds.close()
     ax.legend(loc=1)
+    plt.show()
