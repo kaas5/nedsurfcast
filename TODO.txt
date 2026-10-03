@@ -1,0 +1,16 @@
+werkende parameters:
+# rws buoy data:
+Hm0     golfhoogte (cm)
+Tm-10	golfperiode (s, spectraal moment, nadruk op swell)
+Th0     golfrichting (graad)
+
+matchen met CMEMS:
+VHM0	golfhoogte
+VTM10	golfperiode
+VMDR	golfrichting
+
+TODO:
+buoy data van andere stations downloaden
+buoy data kan veeeel compacter worden opgeslagen
+grotere trainingset downloaden (zowel parameters als tijdspan)
+

@@ -1,0 +1,137 @@
+                                                      Grootheid.Code                                        Grootheid.Omschrijving
+Code                                                                                                                              
+kornwerderzand.waddenzee.buitenhaven                           50%_L                             50 percentiel van de levendigheid
+kornwerderzand.waddenzee.buitenhaven                           70%_L                             70 percentiel van de levendigheid
+kornwerderzand.waddenzee.buitenhaven                           80%_L                             80 percentiel van de levendigheid
+kornwerderzand.waddenzee.buitenhaven                           90%_L                             90 percentiel van de levendigheid
+walcheren.vlissingentotzoutelande.paal26tot36.nld1002          AANTL                                                        Aantal
+noordwijk.strandafvalmeetnet                                AANTPLTE                                             Aantal per lengte
+medemblik.5                                                AANTPVLME                                             Aantal per volume
+gravenbol                                                    AANWZHD                                                  Aanwezigheid
+haringvlietsluizen                                          ACCMLTDR                                               Accumulatieduur
+terneuzen.boeiwpt2                                        ACTVTCCTTE                                       Activiteitsconcentratie
+markermeer.midden.meetpaal42                                      AG                           Aantal golven in 20 minuten periode
+amsterdam.km25                                                ALKLTT                                                    Alkaliteit
+genemuiden.veer                                                ANMLE                                                      Anomalie
+schouwenbank.1                                                AV10_H     Aantal vrijheidsgraden bij het variantiedichtheidspectrum
+vlaktevanderaan.2                                             AV10_R  Aantal vrijheidsgraden behorend bij het golfrichtingspectrum
+lobith.ponton                                                BEMSRDR                                             Bemonsteringsduur
+krimpenaandeijssel.km15.ro                                 BEMSROPVK                                        Bemonsteringsoppervlak
+lelystad.houtribhoek.strand                              BIOVLMPVLME                                  Biovolume per volume eenheid
+delfzijl.zeehavenkanaal                                      BREEDTE                                                       Breedte
+genemuiden.veer                                              CONCTTE                                           (massa)Concentratie
+hato.kayatilburg                                                 D10        maximale korreldiameter voor 10% van het monstervolume
+roggenplaat.noord                                                D20        maximale korreldiameter voor 20% van het monstervolume
+roggenplaat.noord                                                D30        maximale korreldiameter voor 30% van het monstervolume
+roggenplaat.noord                                                D40        maximale korreldiameter voor 40% van het monstervolume
+roggenplaat.noord                                                D50        maximale korreldiameter voor 50% van het monstervolume
+roggenplaat.noord                                                D60        maximale korreldiameter voor 60% van het monstervolume
+roggenplaat.noord                                                D70        maximale korreldiameter voor 70% van het monstervolume
+roggenplaat.noord                                                D80        maximale korreldiameter voor 80% van het monstervolume
+roggenplaat.noord                                                D90        maximale korreldiameter voor 90% van het monstervolume
+maassluis                                                   delta13C                   Verhouding isotopen koolstof 13/koolstof-12
+maassluis                                                   delta15N                   Verhouding isotopen stikstof-15/stikstof-14
+terneuzen.westsluis.buiten                                   DICHTHD                                 Dichtheid (soortelijke massa)
+delfzijl.zeehavenkanaal                                        DIKTE                                                         Dikte
+meppelerdiep.sluis                                           DRAAITD                                                     Draaitijd
+poeldonk.dungensebrug                                              E                                                     Extinctie
+ameland.nes                                                     ECHO                                                   Echosterkte
+delfzijl.zeehavenkanaal                                   EMBOODAMTR                                           Embryo oog diameter
+markerwadden.meetpaal                                       FLUORCTE                                                 Fluorescentie
+markermeer.midden.meetpaal42                                      Fp    Golffrequentie bij maximum v.h. variantiedichtheidspectrum
+lobith.ponton                                                 GELDHD                                                 Geleidendheid
+zoutkamp                                                      GETVVG                                              Getijvervroeging
+oosterdijk                                                GEURVDNFTR                                         Geurverdunningsfactor
+valkenisse.overloop.nabijboei65a                                 GGH                      Gemiddelde golfhoogte in het tijdsdomein
+valkenisse.overloop.nabijboei65a                                 GGT                     Gemiddelde golfperiode in het tijdsdomein
+genemuiden.veer                                              GOLFHTE                                                    Golfhoogte
+markermeer.midden.meetpaal42                                   H1/10   Gem. hoogte van hoogste 1/10 deel v.d. golven (tijdsdomein)
+markermeer.midden.meetpaal42                                    H1/3    Gem. hoogte van hoogste 1/3 deel v.d. golven (tijdsdomein)
+markermeer.midden.meetpaal42                                   H1/50   Gem. hoogte van hoogste 1/50 deel v.d. golven (tijdsdomein)
+stellendam.haringvlietsluizen.schuif17                        HEFHTE                                                     Hefhoogte
+terneuzen.landtong                                                HH                                                      Hardheid
+haringvlietsluizen                                               HHT                                            Hardheid tijdelijk
+ijmuiden.munitiestort.3                                          Hm0               Significante golfhoogte in het spectrale domein
+markermeer.midden.meetpaal42                                    Hmax                        Maximale golfhoogte in het tijdsdomein
+walcheren.2kmuitdekust                                        HOOGTE                                                        Hoogte
+zwolle.ijssel                                               HOOGWTDG                                                 Hoogwater dag
+zoutkamp                                                    HOOGWTNT                                               Hoogwater nacht
+markermeer.midden.meetpaal42                                    HTE3           Significante deiningshoogte in het spectrale domein
+hollandsekustzone.zuid                                      IMPSSDUM                       Imposexstadium  (Vas Deferens Sequence)
+sambeek.boven                                              INDCTOPDT                                          Indicatie open/dicht
+walcheren.2kmuitdekust                                         INSLG                                                    Instraling
+waddenzee.kustzone.oost                                     INTSSDUM                                               Intersexstadium
+waddenzee.kustzone.oost                                          ISI                                                 Intersexindex
+lobith.ponton                                                  I-TEQ           Internationaal toxisch equivalent volgens NATO/CCMS
+roggenplaat.noord                                                KGF                                          Korrelgroottefractie
+wilhelminakanaal.sluisi                                      KOLKOMZ                                       Kolkomzet van een sluis
+vilsteren.klepmiddenlinkeroever                             KRUINHTE                                                   Kruinhoogte
+haringvlietsluizen                                                Ks              Empirische constante (Haekanson en Jansson 1983)
+roggenplaat.noord                                                KTS                                                      Kurtosis
+zwolle.ijssel                                               LAAGWTDG                                                 Laagwater dag
+delfzijl.zeehavenkanaal                                       LENGTE                                                        Lengte
+maassluis                                                  LENGTE_SD                               Standaarddeviatie van de lengte
+hollandsekust.zuid.alpha                                          LG               Golfhoogte uit spectrum van 0,083 mHz- 8,33 mHz
+genemuiden.veer                                              LUCHTDK                                                     Luchtdruk
+bochtvanwatum.noord                                             M2_M                Tweede moment van het energiedichtheidsspec. 0
+bochtvanwatum.noord                                             M4_M                Vierde moment van het energiedichtheidsspec. 0
+roggenplaat.noord                                              MASSA                                                         Massa
+roggenplaat.noord                                            MASSFTE                                                  Massafractie
+roggenplaat.noord                                                 NG                                                    Natgewicht
+genemuiden.veer                                               NGWTTL                                            Nat gewicht totaal
+dronten.roggebotsluis.vossemeer                                  NVT                                                           NVT
+delden.sluis.schuif2                                           OPNDR                                                  Openingsduur
+volkerak.oost.2                                                   pH                                                     Zuurgraad
+roggenplaat.noord                                              PIEK2                                                        Piek 2
+terneuzen.landtong                                               PMV                                   Kaliumpermanganaat verbruik
+dronten.roggebotsluis.vossemeer                                    Q                                                        Debiet
+hengelo.sluis.boven                                               Qo                                              Opgepompt debiet
+hengelo.sluis.boven                                               Qs                                                  Schutverlies
+haringvlietsluizen                                                R2                                         Correlatiecoefficient
+oosterdijk                                                      REUK                                                          Reuk
+hollandsekustzone.zuid                                          RPSI                                  Relatieve penisgrootte index
+lauwers.oost                                                    S0BH      Gemiddelde golfrichtingspreiding in het spectrale domein
+genemuiden.veer                                               SALNTT                                                    Saliniteit
+roggenplaat.noord                                                SCH                                                    Scheefheid
+kornwerderzand.waddenzee.buitenhaven                         SLOTGHW                                      Slotgemiddelde hoogwater
+kornwerderzand.waddenzee.buitenhaven                         SLOTGLW                                      Slotgemiddelde laagwater
+kornwerderzand.waddenzee.buitenhaven                        SLOTGWAT                                     Slotgemiddelde waterstand
+valkenisse.overloop.nabijboei65a                                SPGH       Standaardafwijking van de golfhoogte in het tijdsdomein
+valkenisse.overloop.nabijboei65a                                SPGT      Standaardafwijking van de golfperiode in het tijdsdomein
+hengelo.sluis.beneden.deur1                                   SPUITD                                                      Spuitijd
+egmondaanzee.20kmuitdekust                                 STROOMRTG                                                Stroomrichting
+ameland.nes                                                STROOMSHD                                                Stroomsnelheid
+kornwerderzand.waddenzee.buitenhaven                               T                                                   Temperatuur
+markermeer.midden.meetpaal42                                    T1/3   Gem. golfperiode langste 1/3 deel v.d. golven (tijdsdomein)
+oosterschelde.10                                                  TE                           Golfenergie in het spectrale domein
+penrod                                                           TE3                       Deiningsenergie in het spectrale domein
+hagestein                                                    TELFAFA                            Percentage telfout alfa activiteit
+hagestein                                                    TELFBTA                            Percentage telfout beta activiteit
+hagestein                                                     TELFH3                Percentage telfout beta activiteit van tritium
+lauwers.oost                                                     Th0               Gemiddelde golfrichting in het spectrale domein
+markermeer.midden.meetpaal42                                  T_H1/3                                Golfperiode die hoort bij H1/3
+hollandsekust.noord.windparkzuid                                 Th3    Gem. richting deining tov ware noorden in spectrale domein
+markermeer.midden.meetpaal42                                  T_Hmax                                Golfperiode die hoort bij Hmax
+lauwers.oost                                                    Tm01        Golfperiode bepaald uit de spectrale momenten m0 en m1
+nieuwnamen.overloopvanvalkenisse                                Tm02        Golfperiode bepaald uit de spectrale momenten m0 en m2
+lauwers.oost                                                   Tm-10       Golfperiode bepaald uit de spectrale momenten m-1 en m0
+markermeer.midden.meetpaal42                                    Tmax                       Maximale golfperiode in het tijdsdomein
+schaarvanoudendoel                                           TROEBHD                                                   Troebelheid
+roggenplaat.noord                                                VAR                                                     Variantie
+hollandsekustzone.zuid                                          VDSI                Vas Deferens Sequence Index (zaadleider index)
+kornwerderzand.waddenzee.buitenhaven                          VERSIE                                                        Versie
+lobith.ponton                                               VERZDGGD                                             Verzadigingsgraad
+gravenbol                                                      VOLME                                                        Volume
+walcheren.2kmuitdekust                                       VOLMFTE                                                 Volumefractie
+kamperhoek.badstrand                                          WATDTE                                                   Waterdiepte
+k13a                                                          WATHTE                                                   Waterhoogte
+hoekvanholland                                                WATOZT                                                    Wateropzet
+kamperhoek.badstrand                                         WINDRTG                                                  Windrichting
+k13a                                                      WINDRTG_SD                         Standaarddeviatie van de windrichting
+hoekvanholland                                               WINDSHD                                                  Windsnelheid
+k13a                                                      WINDSHD_SD                         Standaarddeviatie van de windsnelheid
+hoekvanholland                                                WINDST      Maximale 3 seconden windstoot in de afgelopen 10 minuten
+hollandsekust.zuid.alpha                                         WR1                            1'- gemiddelde van de windrichting
+hollandsekust.zuid.alpha                                         WS1                     1' scalair gemiddelde van de windsnelheid
+k13a                                                            WS10                   10' scalair genmiddelde van de windsnelheid
+kerkdriel                                                      ZICHT                                                     Doorzicht

@@ -16,6 +16,8 @@ copernicusmarine). It focuses on the processing pipeline itself.
 import xarray as xr
 #import xesmf as xe
 import numpy as np
+from scipy.spatial import cKDTree
+import datetime as dt
 import config as cfg
  
 # ---------------------------------------------------------------------------
@@ -145,7 +147,6 @@ def normalize_pressure(ds_wind):
 # ---------------------------------------------------------------------------
  
 def build_dataset(lead_time_hours: int = 0):
-
     ds_wind = load_wind()
     ds_wave = load_waves()
     
@@ -188,6 +189,75 @@ def chronological_split(ds, train_end, val_end):
     val = ds.sel(time=slice(train_end, val_end))
     test = ds.sel(time=slice(val_end, None))
     return train, val, test 
+
+
+GRID_PATH = str(cfg.OUTPUT_ZARR)
+BUOY_DIR = cfg.RAW_DIR / "buoys"  # one .nc per buoy, e.g. lauwers_oost.nc
+OUTPUT_ZARR = str(cfg.PROCESSED_DIR / "northsea_training_data_nowcast_buoys.zarr")
+
+BUOY_VARS = cfg.WAVE_VARS
+
+def circular_mean_deg(angles_deg: np.ndarray) -> float:
+    """Mean of a set of angles in degrees, handling the 0/360 wraparound
+    correctly via sin/cos — a plain np.mean here would be wrong whenever
+    values straddle the 0/360 boundary (same issue as VMDR earlier)."""
+    rad = np.deg2rad(angles_deg)
+    return np.rad2deg(np.arctan2(np.nanmean(np.sin(rad)), np.nanmean(np.cos(rad)))) % 360
+
+def rename_buoy_variables(buoy_ds: xr.Dataset):
+
+    # Newer CDS API downloads use "valid_time" instead of "time", and
+    # "longitude"/"latitude" instead of "lon"/"lat". Handle both.
+
+    #print(buoy_ds.values)
+    #print(buoy_ds.sel(time=slice(dt.datetime(2024, 1, 3), dt.datetime(2024, 1, 4))).values)
+
+    if buoy_ds.attrs['Grootheid.Code'] == 'Hm0':
+        buoy_ds.attrs['Grootheid.Code'] = 'VHM0'
+    elif buoy_ds.attrs['Grootheid.Code'] == 'Tm-10':
+        buoy_ds.attrs['Grootheid.Code'] = 'VTM10'
+    elif buoy_ds.attrs['Grootheid.Code'] == 'Th0':
+        buoy_ds.attrs['Grootheid.Code'] = 'VMDR'
+    else:
+        print('Fout in Grootheid.Code, code is:', buoy_ds.attrs['Grootheid.Code'])
+    print(buoy_ds.attrs['Grootheid.Code'])
+
+
+def resample_buoy_to_grid_time(buoy_ds: xr.Dataset, target_time: np.ndarray) -> xr.Dataset:
+    """Resample a buoy's (likely finer-sampled) time series onto the
+    gridded data's timestamps. Direction uses circular mean; everything
+    else uses a plain mean."""
+    resampled = {}
+    for var in BUOY_VARS:
+        if var not in buoy_ds:
+            resampled[var] = (("time",), np.full(len(target_time), np.nan))
+            continue
+        if var == "VMDR":
+            grouped = buoy_ds[var].resample(time="3h").apply(
+                lambda x: circular_mean_deg(x.values) if x.size else np.nan
+            )
+        else:
+            grouped = buoy_ds[var].resample(time="3h").mean()
+        resampled[var] = grouped.reindex(time=target_time).values
+
+    return xr.Dataset(
+        {var: (("time",), vals) for var, vals in resampled.items()},
+        coords={"time": target_time},
+    )
+
+def match_to_sea_cell(ds_grid: xr.Dataset, buoy_lat: float, buoy_lon: float):
+    """Nearest valid (non-land) grid cell — reuses the sea-mask-aware
+    matching approach from earlier, since the naive nearest-cell lookup
+    can land on a masked land cell near the coast."""
+    sea_mask = ds_grid["VHM0"].isel(time=0).notnull().values
+    lat2d, lon2d = np.meshgrid(ds_grid.lat.values, ds_grid.lon.values, indexing="ij")
+    sea_points = np.column_stack([lat2d[sea_mask], lon2d[sea_mask]])
+
+    tree = cKDTree(sea_points)
+    _, idx = tree.query([buoy_lat, buoy_lon])
+    matched_lat, matched_lon = sea_points[idx]
+    return float(matched_lat), float(matched_lon)
+
  
 # ---------------------------------------------------------------------------
 # 8. CONVERT TO ML-READY ARRAYS (last step, right before feeding a model)
@@ -200,9 +270,15 @@ def to_arrays(ds):
  
  
 if __name__ == "__main__":
+    for nc_path in sorted(BUOY_DIR.glob("*.nc")):
+        buoy_id = nc_path.stem
+        buoy_ds = xr.open_dataset(nc_path)
+        rename_buoy_variables(buoy_ds)
+    
+
     # Example: build a 24-hour-ahead forecasting dataset
-    ds_combined = build_dataset(lead_time_hours=cfg.LEAD_TIME_HOURS)
+    """ds_combined = build_dataset(lead_time_hours=cfg.LEAD_TIME_HOURS)
     train_ds, val_ds, test_ds = chronological_split(ds_combined, cfg.TRAIN_END, cfg.VAL_END)
     X_train, y_train = to_arrays(train_ds)
-    print("X_train shape:", X_train.shape, "y_train shape:", y_train.shape)
+    print("X_train shape:", X_train.shape, "y_train shape:", y_train.shape)"""
  
