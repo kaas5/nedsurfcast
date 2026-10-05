@@ -197,21 +197,10 @@ OUTPUT_ZARR = str(cfg.PROCESSED_DIR / "northsea_training_data_nowcast_buoys.zarr
 
 BUOY_VARS = cfg.WAVE_VARS
 
-def circular_mean_deg(angles_deg: np.ndarray) -> float:
-    """Mean of a set of angles in degrees, handling the 0/360 wraparound
-    correctly via sin/cos — a plain np.mean here would be wrong whenever
-    values straddle the 0/360 boundary (same issue as VMDR earlier)."""
-    rad = np.deg2rad(angles_deg)
-    return np.rad2deg(np.arctan2(np.nanmean(np.sin(rad)), np.nanmean(np.cos(rad)))) % 360
-
 def rename_buoy_variables(buoy_ds: xr.Dataset):
-
-    # Newer CDS API downloads use "valid_time" instead of "time", and
-    # "longitude"/"latitude" instead of "lon"/"lat". Handle both.
-
-    #print(buoy_ds.values)
-    #print(buoy_ds.sel(time=slice(dt.datetime(2024, 1, 3), dt.datetime(2024, 1, 4))).values)
-
+    buoy_ds.attrs["lat"] = buoy_ds.attrs.pop("Lat")
+    buoy_ds.attrs["lon"] = buoy_ds.attrs.pop("Lon")
+    
     if buoy_ds.attrs['Grootheid.Code'] == 'Hm0':
         buoy_ds.attrs['Grootheid.Code'] = 'VHM0'
     elif buoy_ds.attrs['Grootheid.Code'] == 'Tm-10':
@@ -220,25 +209,35 @@ def rename_buoy_variables(buoy_ds: xr.Dataset):
         buoy_ds.attrs['Grootheid.Code'] = 'VMDR'
     else:
         print('Fout in Grootheid.Code, code is:', buoy_ds.attrs['Grootheid.Code'])
-    print(buoy_ds.attrs['Grootheid.Code'])
 
+    rename_map = {}
+    if "Meetwaarde.Waarde_Numeriek" in buoy_ds.data_vars:
+        rename_map["Meetwaarde.Waarde_Numeriek"] = buoy_ds.attrs['Grootheid.Code']
+    buoy_ds = buoy_ds.rename(rename_map)
 
+    return buoy_ds    
+        
 def resample_buoy_to_grid_time(buoy_ds: xr.Dataset, target_time: np.ndarray) -> xr.Dataset:
     """Resample a buoy's (likely finer-sampled) time series onto the
-    gridded data's timestamps. Direction uses circular mean; everything
-    else uses a plain mean."""
+    gridded data's timestamps. Direction uses a circular mean via
+    sin/cos decomposition; everything else uses a plain mean."""
     resampled = {}
-    for var in BUOY_VARS:
+    print('hallo', buoy_ds.attrs['Grootheid.Code'])
+    print('buoy_data_vars', buoy_ds.data_vars)
+    for var in cfg.WAVE_VARS:
         if var not in buoy_ds:
-            resampled[var] = (("time",), np.full(len(target_time), np.nan))
+            resampled[var] = np.full(len(target_time), np.nan)
             continue
+
         if var == "VMDR":
-            grouped = buoy_ds[var].resample(time="3h").apply(
-                lambda x: circular_mean_deg(x.values) if x.size else np.nan
-            )
+            rad = np.deg2rad(buoy_ds[var])
+            sin_mean = np.sin(rad).resample(time="3h").mean()
+            cos_mean = np.cos(rad).resample(time="3h").mean()
+            circular_mean = (np.rad2deg(np.arctan2(sin_mean, cos_mean)) % 360)
+            resampled[var] = circular_mean.reindex(time=target_time).values
         else:
             grouped = buoy_ds[var].resample(time="3h").mean()
-        resampled[var] = grouped.reindex(time=target_time).values
+            resampled[var] = grouped.reindex(time=target_time).values
 
     return xr.Dataset(
         {var: (("time",), vals) for var, vals in resampled.items()},
@@ -258,6 +257,64 @@ def match_to_sea_cell(ds_grid: xr.Dataset, buoy_lat: float, buoy_lon: float):
     matched_lat, matched_lon = sea_points[idx]
     return float(matched_lat), float(matched_lon)
 
+def build_combined_dataset():
+    ds_grid = xr.open_zarr(str(GRID_PATH), consolidated=False)
+
+    buoy_ids, buoy_lats, buoy_lons = [], [], []
+    matched_lats, matched_lons = [], []
+    buoy_obs_by_var = {var: [] for var in BUOY_VARS}
+    residual_by_var = {var: [] for var in BUOY_VARS}
+
+    for nc_path in sorted(BUOY_DIR.glob("*.nc")):
+        buoy_id = nc_path.stem
+        buoy_ds = xr.open_dataset(nc_path)
+        buoy_ds = rename_buoy_variables(buoy_ds)
+
+        buoy_lat = float(buoy_ds.attrs["lat"])   # adjust to however lat/lon is actually stored in your files
+        buoy_lon = float(buoy_ds.attrs["lon"])
+        matched_lat, matched_lon = match_to_sea_cell(ds_grid, buoy_lat, buoy_lon)
+
+        buoy_start, buoy_end = buoy_ds.time.values.min(), buoy_ds.time.values.max()
+        grid_start, grid_end = ds_grid.time.values.min(), ds_grid.time.values.max()
+        overlap_start = max(buoy_start, grid_start)
+        overlap_end = min(buoy_end, grid_end)
+        print(f'buoy {buoy_id}')
+        print(f"{buoy_id}: buoy [{buoy_start}, {buoy_end}], grid [{grid_start}, {grid_end}], overlap: {(overlap_end - overlap_start).item() / (1000000000 * 3600 * 24)}")
+        
+
+        buoy_resampled = resample_buoy_to_grid_time(buoy_ds, ds_grid.time.values)
+        grid_at_cell = ds_grid.sel(lat=matched_lat, lon=matched_lon, method="nearest")
+
+        buoy_ids.append(buoy_id)
+        buoy_lats.append(buoy_lat)
+        buoy_lons.append(buoy_lon)
+        matched_lats.append(matched_lat)
+        matched_lons.append(matched_lon)
+
+        for var in BUOY_VARS:
+            buoy_obs_by_var[var].append(buoy_resampled[var].values)
+            if var in grid_at_cell:
+                residual_by_var[var].append(buoy_resampled[var].values - grid_at_cell[var].values)
+            else:
+                residual_by_var[var].append(np.full(len(ds_grid.time), np.nan))
+
+    buoy_ds_combined = xr.Dataset(
+        data_vars={
+            **{f"buoy_{var}": (("buoy_id", "time"), np.array(buoy_obs_by_var[var])) for var in BUOY_VARS},
+            **{f"residual_{var}": (("buoy_id", "time"), np.array(residual_by_var[var])) for var in BUOY_VARS},
+            "buoy_lat": (("buoy_id",), np.array(buoy_lats)),
+            "buoy_lon": (("buoy_id",), np.array(buoy_lons)),
+            "matched_grid_lat": (("buoy_id",), np.array(matched_lats)),
+            "matched_grid_lon": (("buoy_id",), np.array(matched_lons)),
+        },
+        coords={"buoy_id": buoy_ids, "time": ds_grid.time.values},
+    )
+
+    ds_combined = xr.merge([ds_grid, buoy_ds_combined])
+    ds_combined.to_zarr(str(OUTPUT_ZARR), mode="w")
+    print(f"Saved combined dataset to {OUTPUT_ZARR}")
+    return ds_combined
+
  
 # ---------------------------------------------------------------------------
 # 8. CONVERT TO ML-READY ARRAYS (last step, right before feeding a model)
@@ -270,11 +327,7 @@ def to_arrays(ds):
  
  
 if __name__ == "__main__":
-    for nc_path in sorted(BUOY_DIR.glob("*.nc")):
-        buoy_id = nc_path.stem
-        buoy_ds = xr.open_dataset(nc_path)
-        rename_buoy_variables(buoy_ds)
-    
+    build_combined_dataset()
 
     # Example: build a 24-hour-ahead forecasting dataset
     """ds_combined = build_dataset(lead_time_hours=cfg.LEAD_TIME_HOURS)
