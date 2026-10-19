@@ -141,7 +141,9 @@ def wave_direction_to_sin_cos(ds_wave):
 def normalize_pressure(ds_wind):
     ds_wind["msl"] = ds_wind["msl"] / 100000
     return ds_wind
- 
+
+
+
 # ---------------------------------------------------------------------------
 # 6. MERGE FEATURES + LABELS, SANITY CHECK, WRITE TO ZARR
 # ---------------------------------------------------------------------------
@@ -302,6 +304,14 @@ def load_station(station_id: str, station_grootheid_list: list) -> xr.Dataset:
     merged.attrs["station_id"] = station_id
     return merged
 
+def waveheight_cm_to_m(ds):
+    if 'VHM0' in ds.data_vars:
+        ds['VHM0'] = ds['VHM0'] / 100 
+        print('VHM0 in data_vars')
+        return ds
+    print('VHM0 NIET in data_vars')
+    return ds
+
 def build_combined_dataset():
     ds_grid = xr.open_zarr(str(GRID_PATH), consolidated=False)
 
@@ -326,6 +336,7 @@ def build_combined_dataset():
 
         buoy_ds = load_station(station, stations[station])
         buoy_id = buoy_ds.attrs["station_id"]
+        buoy_ds = waveheight_cm_to_m(buoy_ds)
 
         buoy_lat = float(buoy_ds.attrs["Lat"])   # adjust to however lat/lon is actually stored in your files
         buoy_lon = float(buoy_ds.attrs["Lon"])
