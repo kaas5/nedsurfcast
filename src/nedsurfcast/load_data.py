@@ -325,6 +325,7 @@ def build_combined_dataset():
         #buoy_ds = rename_buoy_variables(buoy_ds)
 
         buoy_ds = load_station(station, stations[station])
+        buoy_id = buoy_ds.attrs["station_id"]
 
         buoy_lat = float(buoy_ds.attrs["Lat"])   # adjust to however lat/lon is actually stored in your files
         buoy_lon = float(buoy_ds.attrs["Lon"])
