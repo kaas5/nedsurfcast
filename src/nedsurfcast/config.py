@@ -21,7 +21,7 @@ TRAIN_END="2024-11-01"
 VAL_END="2024-12-01"
 
 WIND_VARS = ["u10", "v10", "msl"]       # ERA5: 10m wind components + mean sea level pressure
-WAVE_VARS = ["VHM0", "VTM10", "VMDR"]    # CMEMS WW3: sig. wave height, peak period, mean direction
+WAVE_VARS = ["VHM0", "VTM10", "VMDR"]    # CMEMS WW3: sig. wave height, period, mean direction
 RWS_WAVE_VARS = ["Hm0", "Tm-10", "Th0"]   # golfhoogte (cm), golfperiode (s, spectraal moment, nadruk op swell), golfrichting (graad)
 
 MODEL_OUTPUT_VARS = ["VHM0", "VTM10", "VMDR_sin", "VMDR_cos"]

@@ -196,6 +196,7 @@ BUOY_DIR = cfg.RAW_DIR / "buoys"  # one .nc per buoy, e.g. lauwers_oost.nc
 OUTPUT_ZARR = str(cfg.PROCESSED_DIR / "northsea_training_data_nowcast_buoys.zarr")
 
 BUOY_VARS = cfg.WAVE_VARS
+RWS_TO_CMEMS = {"Hm0": "VHM0", "Tm-10": "VTM10", "Th0": "VMDR"}
 
 def rename_buoy_variables(buoy_ds: xr.Dataset):
     buoy_ds.attrs["lat"] = buoy_ds.attrs.pop("Lat")
@@ -222,7 +223,7 @@ def resample_buoy_to_grid_time(buoy_ds: xr.Dataset, target_time: np.ndarray) -> 
     gridded data's timestamps. Direction uses a circular mean via
     sin/cos decomposition; everything else uses a plain mean."""
     resampled = {}
-    print('hallo', buoy_ds.attrs['Grootheid.Code'])
+    #print('hallo', buoy_ds.attrs['Grootheid.Code'])
     print('buoy_data_vars', buoy_ds.data_vars)
     for var in cfg.WAVE_VARS:
         if var not in buoy_ds:
@@ -257,6 +258,50 @@ def match_to_sea_cell(ds_grid: xr.Dataset, buoy_lat: float, buoy_lon: float):
     matched_lat, matched_lon = sea_points[idx]
     return float(matched_lat), float(matched_lon)
 
+def combine_station_grootheid(station_name: str, station_grootheid_list: list):
+    parts = []
+    for grootheid in station_grootheid_list:
+        ds = xr.open_dataset(str(BUOY_DIR / f'{station_name}-.-{grootheid}.nc'))
+        code = str(ds["Grootheid.Code"].values.flat[0])  # preserved via always_preserve; check how it's stored in your files
+        parts.append(ds["Meetwaarde.Waarde_Numeriek"].rename(RWS_TO_CMEMS[code]).to_dataset())
+    return xr.merge(parts)  # outer join on time, NaN where a code has no value at that time
+
+def _attrs_equal(a, b) -> bool:
+    try:
+        return bool(np.array_equal(a, b))
+    except Exception:
+        return False
+
+def load_station(station_id: str, station_grootheid_list: list) -> xr.Dataset:
+    files = []
+    for grootheid in station_grootheid_list:
+        files.append(str(BUOY_DIR / f'{station_id}-.-{grootheid}.nc'))
+
+    datasets = [xr.open_dataset(f) for f in sorted(files)]
+
+    # Station-level attrs = keys present with identical values in every file
+    first = datasets[0].attrs
+    station_attrs = {
+        k: v for k, v in first.items()
+        if all(k in d.attrs and _attrs_equal(d.attrs[k], v) for d in datasets[1:])
+    }
+
+    parts = []
+    for ds in datasets:
+        code = str(ds["Grootheid.Code"].values.flat[0])  # check how this is stored in your files
+        if code not in RWS_TO_CMEMS:
+            continue
+        da = ds["Meetwaarde.Waarde_Numeriek"].rename(RWS_TO_CMEMS[code])
+        da = da.drop_duplicates("time")
+        # Parameter-level metadata (units, description, ...) stays on the variable
+        da.attrs = {k: v for k, v in ds.attrs.items() if k not in station_attrs}
+        parts.append(da.to_dataset())
+
+    merged = xr.merge(parts, combine_attrs="drop")  # outer join on time; NaN where a code has no value
+    merged.attrs = station_attrs                    # station metadata lives on the Dataset
+    merged.attrs["station_id"] = station_id
+    return merged
+
 def build_combined_dataset():
     ds_grid = xr.open_zarr(str(GRID_PATH), consolidated=False)
 
@@ -265,13 +310,24 @@ def build_combined_dataset():
     buoy_obs_by_var = {var: [] for var in BUOY_VARS}
     residual_by_var = {var: [] for var in BUOY_VARS}
 
+    stations = {}
     for nc_path in sorted(BUOY_DIR.glob("*.nc")):
-        buoy_id = nc_path.stem
-        buoy_ds = xr.open_dataset(nc_path)
-        buoy_ds = rename_buoy_variables(buoy_ds)
+        buoy_id = nc_path.stem.split('-.-')[0]
+        buoy_grootheid = nc_path.stem.split('-.-')[1]
+        if buoy_id in list(stations.keys()):
+            stations[buoy_id].append(buoy_grootheid)
+        else:
+            stations[buoy_id] = [buoy_grootheid]
 
-        buoy_lat = float(buoy_ds.attrs["lat"])   # adjust to however lat/lon is actually stored in your files
-        buoy_lon = float(buoy_ds.attrs["lon"])
+    for station in list(stations.keys()):
+        #buoy_id = nc_path.stem
+        #buoy_ds = xr.open_dataset(nc_path)
+        #buoy_ds = rename_buoy_variables(buoy_ds)
+
+        buoy_ds = load_station(station, stations[station])
+
+        buoy_lat = float(buoy_ds.attrs["Lat"])   # adjust to however lat/lon is actually stored in your files
+        buoy_lon = float(buoy_ds.attrs["Lon"])
         matched_lat, matched_lon = match_to_sea_cell(ds_grid, buoy_lat, buoy_lon)
 
         buoy_start, buoy_end = buoy_ds.time.values.min(), buoy_ds.time.values.max()
@@ -280,7 +336,6 @@ def build_combined_dataset():
         overlap_end = min(buoy_end, grid_end)
         print(f'buoy {buoy_id}')
         print(f"{buoy_id}: buoy [{buoy_start}, {buoy_end}], grid [{grid_start}, {grid_end}], overlap: {(overlap_end - overlap_start).item() / (1000000000 * 3600 * 24)}")
-        
 
         buoy_resampled = resample_buoy_to_grid_time(buoy_ds, ds_grid.time.values)
         grid_at_cell = ds_grid.sel(lat=matched_lat, lon=matched_lon, method="nearest")

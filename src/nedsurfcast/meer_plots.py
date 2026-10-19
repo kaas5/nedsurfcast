@@ -59,9 +59,13 @@ def plot_coverage(ds: xr.Dataset, var: str = HEIGHT_VAR):
 # 2. Location map — buoy position vs. matched WW3 grid cell
 # ---------------------------------------------------------------------------
  
-def plot_locations(ds: xr.Dataset):
+def plot_locations(ds: xr.Dataset,
+                   lat_range: tuple[float, float] | None = None,
+                   lon_range: tuple[float, float] | None = None,):
     land_mask = ds[HEIGHT_VAR].isel(time=0).isnull().values.astype(float)
     lon, lat = ds.lon.values, ds.lat.values
+
+
  
     fig, ax = plt.subplots(figsize=(8, 7))
     ax.contour(lon, lat, land_mask, levels=[0.5], colors="black", linewidths=1.0)
@@ -81,6 +85,11 @@ def plot_locations(ds: xr.Dataset):
             ((matched_lon[i] - buoy_lon[i]) * 111 * np.cos(np.radians(buoy_lat[i]))) ** 2
         )
         ax.annotate(f"{str(ds.buoy_id.values[i])}\n{dist_km:.1f} km", (buoy_lon[i], buoy_lat[i]), fontsize=7)
+
+    if lon_range is not None:
+        ax.set_xlim(lon_range)
+    if lat_range is not None:
+        ax.set_ylim(lat_range)
  
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
@@ -119,7 +128,8 @@ def plot_buoy_timeseries(ds: xr.Dataset, buoy_id: str):
     # Direction: plot sin component only, since raw degrees would show
     # fake 360->0 discontinuities that look like data problems but aren't
     axes[2].plot(ds.time, np.sin(np.deg2rad(b[f"buoy_{DIR_VAR}"])), label="Buoy sin(direction)", linewidth=0.8)
-    axes[2].plot(ds.time, np.sin(np.deg2rad(grid_at_cell['VMDR_sin'])), label="WW3 sin(direction)", linewidth=0.8, alpha=0.8)
+    #axes[2].plot(ds.time, np.sin(np.deg2rad(grid_at_cell['VMDR_sin'])), label="WW3 sin(direction)", linewidth=0.8, alpha=0.8)
+    axes[2].plot(ds.time, grid_at_cell['VMDR_sin'], label="WW3 sin(direction)", linewidth=0.8, alpha=0.8)
     axes[2].set_ylabel("sin(direction)")
     axes[2].set_xlabel("Time")
     axes[2].legend()
@@ -131,9 +141,9 @@ def plot_buoy_timeseries(ds: xr.Dataset, buoy_id: str):
  
 if __name__ == "__main__":
     ds = load()
-    plot_coverage(ds)
-    plot_locations(ds)
-    plot_buoy_timeseries(ds, 'vlaktevanderaan.2-2639')
+    #plot_coverage(ds)
+    plot_locations(ds, lat_range=(51.3, 56.0), lon_range=(2.0,8.0))
+    #plot_buoy_timeseries(ds, 'vlaktevanderaan.2-2639')
     #for buoy_id in ds.buoy_id.values:
         #plot_buoy_timeseries(ds, buoy_id)#vlaktevanderaan.2-2639
  
