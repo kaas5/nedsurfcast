@@ -65,8 +65,6 @@ def plot_locations(ds: xr.Dataset,
                    lon_range: tuple[float, float] | None = None,):
     land_mask = ds[HEIGHT_VAR].isel(time=0).isnull().values.astype(float)
     lon, lat = ds.lon.values, ds.lat.values
-
-
  
     fig, ax = plt.subplots(figsize=(8, 7))
     ax.contour(lon, lat, land_mask, levels=[0.5], colors="black", linewidths=1.0)
@@ -142,9 +140,9 @@ def plot_buoy_timeseries(ds: xr.Dataset, buoy_id: str):
  
 if __name__ == "__main__":
     ds = load()
-    plot_coverage(ds)
-    plot_locations(ds, lat_range=(51.3, 56.0), lon_range=(2.0,8.0))
-    plot_buoy_timeseries(ds, 'vlaktevanderaan.2-2639')
+    #plot_coverage(ds)
+    plot_locations(ds, lat_range=(51.2, 56.0), lon_range=(2.0,8.0))
+    #plot_buoy_timeseries(ds, 'vlaktevanderaan.2-2639')
     #for buoy_id in ds.buoy_id.values:
     #    plot_buoy_timeseries(ds, buoy_id)#vlaktevanderaan.2-2639
  

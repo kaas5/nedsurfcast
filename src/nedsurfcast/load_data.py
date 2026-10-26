@@ -213,6 +213,12 @@ def rename_buoy_variables(buoy_ds: xr.Dataset):
 
     return buoy_ds    
         
+# Grid values are instantaneous, so average the buoy over [t-90min, t+90min) and label it t.
+# offset alone only moves the bin edges; the labels stay at the bin start, hence the shift.
+def resample_centered(da: xr.DataArray) -> xr.DataArray:
+    out = da.resample(time="3h", offset="-90min").mean()
+    return out.assign_coords(time=out.time + np.timedelta64(90, "m"))
+
 def resample_buoy_to_grid_time(buoy_ds: xr.Dataset, target_time: np.ndarray) -> xr.Dataset:
     """Resample a buoy's (likely finer-sampled) time series onto the
     gridded data's timestamps. Direction uses a circular mean via
@@ -227,12 +233,12 @@ def resample_buoy_to_grid_time(buoy_ds: xr.Dataset, target_time: np.ndarray) -> 
 
         if var == "VMDR":
             rad = np.deg2rad(buoy_ds[var])
-            sin_mean = np.sin(rad).resample(time="3h").mean()
-            cos_mean = np.cos(rad).resample(time="3h").mean()
+            sin_mean = resample_centered(np.sin(rad))
+            cos_mean = resample_centered(np.cos(rad))
             circular_mean = (np.rad2deg(np.arctan2(sin_mean, cos_mean)) % 360)
             resampled[var] = circular_mean.reindex(time=target_time).values
         else:
-            grouped = buoy_ds[var].resample(time="3h").mean()
+            grouped = resample_centered(buoy_ds[var])
             resampled[var] = grouped.reindex(time=target_time).values
 
     return xr.Dataset(
@@ -267,6 +273,17 @@ def _attrs_equal(a, b) -> bool:
     except Exception:
         return False
 
+QUALITY_CODE = "WaarnemingMetadata.Kwaliteitswaardecode"
+
+# RWS marks missing/unreliable measurements with quality code 99 (value 99999).
+# ddlpy stores the code as an attribute instead of a variable when it is constant in a file.
+def mask_bad_quality(da: xr.DataArray, ds: xr.Dataset) -> xr.DataArray:
+    if QUALITY_CODE in ds.data_vars:
+        return da.where(ds[QUALITY_CODE].isin(cfg.RWS_VALID_QUALITY_CODES))
+    if str(ds.attrs.get(QUALITY_CODE)) in cfg.RWS_VALID_QUALITY_CODES:
+        return da
+    return da.where(False)
+
 def load_station(station_id: str, station_grootheid_list: list) -> xr.Dataset:
     files = []
     for grootheid in station_grootheid_list:
@@ -287,6 +304,7 @@ def load_station(station_id: str, station_grootheid_list: list) -> xr.Dataset:
         if code not in cfg.RWS_TO_WAVE_VARS:
             continue
         da = ds["Meetwaarde.Waarde_Numeriek"].rename(cfg.RWS_TO_WAVE_VARS[code])
+        da = mask_bad_quality(da, ds)
         da = da.drop_duplicates("time")
         # Parameter-level metadata (units, description, ...) stays on the variable
         da.attrs = {k: v for k, v in ds.attrs.items() if k not in station_attrs}
@@ -305,6 +323,12 @@ def waveheight_cm_to_m(ds):
     print('VHM0 NIET in data_vars')
     return ds
 
+# Spikes that passed the quality code check, e.g. 19.4 m at borsselealpha
+def mask_impossible_waveheight(ds):
+    if 'VHM0' in ds.data_vars:
+        ds['VHM0'] = ds['VHM0'].where(ds['VHM0'] <= cfg.MAX_WAVE_HEIGHT_M)
+    return ds
+
 def build_combined_dataset():
     ds_grid = xr.open_zarr(str(cfg.GRID_ZARR), consolidated=False)
 
@@ -316,6 +340,12 @@ def build_combined_dataset():
     stations = {}
     for nc_path in sorted(cfg.BUOY_DIR.glob("*.nc")):
         buoy_id = nc_path.stem.split('-.-')[0]
+        buoy_name = buoy_id.split('-')[0]
+        if buoy_name in cfg.BUOY_IGNORE_LIST:
+            print(f'ignoring {buoy_name}')
+            continue
+        #print(f'adding {buoy_name}')
+
         buoy_grootheid = nc_path.stem.split('-.-')[1]
         if buoy_id in list(stations.keys()):
             stations[buoy_id].append(buoy_grootheid)
@@ -326,6 +356,7 @@ def build_combined_dataset():
         buoy_ds = load_station(station, stations[station])
         buoy_id = buoy_ds.attrs["station_id"]
         buoy_ds = waveheight_cm_to_m(buoy_ds)
+        buoy_ds = mask_impossible_waveheight(buoy_ds)
 
         buoy_lat = float(buoy_ds.attrs["Lat"])   # adjust to however lat/lon is actually stored in your files
         buoy_lon = float(buoy_ds.attrs["Lon"])

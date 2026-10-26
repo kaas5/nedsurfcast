@@ -39,3 +39,38 @@ WAVE_COARSEN_FACTOR = 3  # e.g. 3 -> ~4.5 km cells, ~9x less memory than native 
 """ Model training parameters """
 HISTORY_LEN = 4          # number of past wind timesteps stacked as input channels
 BEST_MODEL_NAME = 'best_model_nowcast.pt'
+
+
+BUOY_IGNORE_LIST = ['honte.kaloot',
+                    'pasvanterneuzen', 
+                    'vaarwaterlangshoofdplaat', 
+                    'vaarwaterlangshoofdplaat.4',
+                    'valkenisse.overloop.nabijboei65a', 
+                    'marollegat', 
+                    'keeten', 
+                    'oosterschelde.4',
+                    'hansweert.2',
+                    'hansweert.2overloop',
+                    'hansweert',
+                    'bath.2',
+                    'rilland.bath',
+                    'markermeer.midden',
+                    'markermeer.trintelzand',
+                    'rotterdamsehoek.meetpaalfl2',
+                    'ameland.nes',
+                    'denhoorntexel.waddenzee.gatvandestier',
+                    'denhelder.waddenzee.mondingnieuwehaven',
+                    'oudewestereems.zuid',
+                    'uithuizerwad',
+                    'eemshaven.waddenzee',
+                    # sheltered behind structures / in estuaries, not representable on the WW3 grid
+                    'hoekvanholland.maeslantkering.beneden.noord',
+                    'haringvlietsluizen.buiten',
+                    'oudewestereems.noord.boei',
+                    'stortemelk.oost',
+                    'stortemelk.west']
+
+RWS_VALID_QUALITY_CODES = ['00']  # 00 = normal value, 99 = missing/unreliable
+MAX_WAVE_HEIGHT_M = 20.0          # anything above this at a Dutch buoy is a measurement error
+
+BUOY_GROUP_DISTANCE_KM = 15.0     # buoys whose matched cells are closer than this are held out together

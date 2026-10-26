@@ -14,7 +14,8 @@ relationship between local conditions and WW3 error, which is exactly
 what would let it generalize to grid cells that have no buoy.
  
 Two validation schemes answer two different questions:
-  - leave-one-buoy-out : does the correction transfer to an unseen LOCATION?
+  - leave-one-group-out: does the correction transfer to an unseen LOCATION?
+                         (nearby buoys are held out together, see buoy_groups)
   - blocked-time       : does it transfer to unseen WEATHER (other time periods)?
  
 Prerequisites (pip install):
@@ -32,6 +33,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
+from scipy.cluster.hierarchy import fcluster, linkage
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
@@ -50,7 +52,7 @@ LAG_STEPS = [1, 2, 4]                            # in dataset time steps (e.g. 3
 N_TIME_BLOCKS = 5
 TIME_GAP_HOURS = 24                              # buffer around each test block to limit autocorrelation leakage
  
- 
+
 # ---------------------------------------------------------------------------
 # 1. BUILD THE POOLED TABLE
 # ---------------------------------------------------------------------------
@@ -80,7 +82,7 @@ def build_table(ds: xr.Dataset, target: str = TARGET) -> pd.DataFrame:
  
     f["wind_u"], f["wind_v"] = local["u10"], local["v10"]
     f["wind_speed"] = np.hypot(local["u10"], local["v10"])
-    f["msl_hpa"] = local["msl"] / 100.0
+    f["msl_hpa"] = local["msl"] * 1000.0  # msl is stored in Pa / 100,000 (see load_data.normalize_pressure)
  
     # Recent history: swell reflects wind over the previous hours/days, not just the current wind
     for k in LAG_STEPS:
@@ -95,11 +97,24 @@ def build_table(ds: xr.Dataset, target: str = TARGET) -> pd.DataFrame:
  
     table = xr.Dataset({**f, "ww3_target": ww3_target, "obs": obs, "target": residual})
     df = table.to_dataframe()
+    df["buoy_group"] = df.index.get_level_values("buoy_id").map(buoy_groups(ds, target))
     return df.dropna(subset=["target"])
- 
- 
+
+
+def buoy_groups(ds: xr.Dataset, target: str = TARGET, max_km: float = cfg.BUOY_GROUP_DISTANCE_KM) -> pd.Series:
+    """Single-linkage clusters of matched grid cells: a buoy joins a group when its cell is within
+    max_km of any member. Buoys sharing a cell always end up together (distance 0)."""
+    # Buoys without observations would otherwise chain neighbouring groups together
+    ds = ds.sel(buoy_id=ds[f"buoy_{target}"].notnull().any("time").compute())
+    lat, lon = ds["matched_grid_lat"].values, ds["matched_grid_lon"].values
+    # Equirectangular km coordinates, accurate enough over the North Sea
+    xy = np.column_stack([lon * 111.32 * np.cos(np.deg2rad(lat.mean())), lat * 110.57])
+    labels = fcluster(linkage(xy, method="single"), t=max_km, criterion="distance")
+    return pd.Series(labels, index=ds["buoy_id"].values, name="buoy_group")
+
+
 def feature_columns(df: pd.DataFrame) -> list[str]:
-    return [c for c in df.columns if c not in ("ww3_target", "obs", "target")]
+    return [c for c in df.columns if c not in ("ww3_target", "obs", "target", "buoy_group")]
  
  
 # ---------------------------------------------------------------------------
@@ -121,8 +136,9 @@ MODELS = {
 # 3. VALIDATION SCHEMES
 # ---------------------------------------------------------------------------
  
-def evaluate_leave_one_buoy_out(df, cols, make_model) -> pd.Series:
-    groups = df.index.get_level_values("buoy_id")
+# Nearby buoys see (almost) the same conditions, so a whole group is held out at once
+def evaluate_leave_one_group_out(df, cols, make_model) -> pd.Series:
+    groups = df["buoy_group"]
     pred = pd.Series(np.nan, index=df.index)
     for train_idx, test_idx in LeaveOneGroupOut().split(df, groups=groups):
         model = make_model()
@@ -150,7 +166,7 @@ def evaluate_blocked_time(df, cols, make_model, n_blocks=N_TIME_BLOCKS, gap_hour
  
  
 SCHEMES = {
-    "leave-one-buoy": evaluate_leave_one_buoy_out,
+    "leave-one-group": evaluate_leave_one_group_out,
     "blocked-time": evaluate_blocked_time,
 }
  
@@ -227,6 +243,8 @@ if __name__ == "__main__":
  
     print("Rows per buoy (after dropping missing targets):")
     print(df.groupby(level="buoy_id").size().to_string())
+    print("\nBuoy groups (held out together in leave-one-group):")
+    print(df.reset_index().groupby("buoy_group")["buoy_id"].unique().apply(list).to_string())
     print(f"\nFeatures ({len(cols)}): {cols}\n")
  
     results = {}
@@ -237,7 +255,7 @@ if __name__ == "__main__":
             summarize(name, scheme, df, pred)
         print()
  
-    chosen = ("leave-one-buoy", "hist-gbr")
-    breakdown(df, results[chosen], "leave-one-buoy / hist-gbr")
-    plot_pred_vs_actual(df, results[chosen], "Leave-one-buoy-out: predicted vs. actual WW3 residual")
+    chosen = ("leave-one-group", "hist-gbr")
+    breakdown(df, results[chosen], "leave-one-group / hist-gbr")
+    plot_pred_vs_actual(df, results[chosen], "Leave-one-group-out: predicted vs. actual WW3 residual")
  
