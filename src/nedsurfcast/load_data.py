@@ -176,8 +176,8 @@ def build_dataset(lead_time_hours: int = 0):
     ds_combined = xr.merge([ds_wind_aligned, ds_wave_aligned[cfg.MODEL_OUTPUT_VARS]])
     ds_combined = ds_combined.chunk({"time": 24, "lat": -1, "lon": -1})
  
-    ds_combined.to_zarr(str(cfg.OUTPUT_ZARR), mode="w")
-    print(f"Saved aligned training data to {cfg.OUTPUT_ZARR}")
+    ds_combined.to_zarr(str(cfg.GRID_ZARR), mode="w")
+    print(f"Saved aligned training data to {cfg.GRID_ZARR}")
     return ds_combined
  
  
@@ -192,13 +192,6 @@ def chronological_split(ds, train_end, val_end):
     test = ds.sel(time=slice(val_end, None))
     return train, val, test 
 
-
-GRID_PATH = str(cfg.OUTPUT_ZARR)
-BUOY_DIR = cfg.RAW_DIR / "buoys"  # one .nc per buoy, e.g. lauwers_oost.nc
-OUTPUT_ZARR = str(cfg.PROCESSED_DIR / "northsea_training_data_nowcast_buoys.zarr")
-
-BUOY_VARS = cfg.WAVE_VARS
-RWS_TO_CMEMS = {"Hm0": "VHM0", "Tm-10": "VTM10", "Th0": "VMDR"}
 
 def rename_buoy_variables(buoy_ds: xr.Dataset):
     buoy_ds.attrs["lat"] = buoy_ds.attrs.pop("Lat")
@@ -263,9 +256,9 @@ def match_to_sea_cell(ds_grid: xr.Dataset, buoy_lat: float, buoy_lon: float):
 def combine_station_grootheid(station_name: str, station_grootheid_list: list):
     parts = []
     for grootheid in station_grootheid_list:
-        ds = xr.open_dataset(str(BUOY_DIR / f'{station_name}-.-{grootheid}.nc'))
+        ds = xr.open_dataset(str(cfg.BUOY_DIR / f'{station_name}-.-{grootheid}.nc'))
         code = str(ds["Grootheid.Code"].values.flat[0])  # preserved via always_preserve; check how it's stored in your files
-        parts.append(ds["Meetwaarde.Waarde_Numeriek"].rename(RWS_TO_CMEMS[code]).to_dataset())
+        parts.append(ds["Meetwaarde.Waarde_Numeriek"].rename(cfg.RWS_TO_WAVE_VARS[code]).to_dataset())
     return xr.merge(parts)  # outer join on time, NaN where a code has no value at that time
 
 def _attrs_equal(a, b) -> bool:
@@ -277,7 +270,7 @@ def _attrs_equal(a, b) -> bool:
 def load_station(station_id: str, station_grootheid_list: list) -> xr.Dataset:
     files = []
     for grootheid in station_grootheid_list:
-        files.append(str(BUOY_DIR / f'{station_id}-.-{grootheid}.nc'))
+        files.append(str(cfg.BUOY_DIR / f'{station_id}-.-{grootheid}.nc'))
 
     datasets = [xr.open_dataset(f) for f in sorted(files)]
 
@@ -291,9 +284,9 @@ def load_station(station_id: str, station_grootheid_list: list) -> xr.Dataset:
     parts = []
     for ds in datasets:
         code = str(ds["Grootheid.Code"].values.flat[0])  # check how this is stored in your files
-        if code not in RWS_TO_CMEMS:
+        if code not in cfg.RWS_TO_WAVE_VARS:
             continue
-        da = ds["Meetwaarde.Waarde_Numeriek"].rename(RWS_TO_CMEMS[code])
+        da = ds["Meetwaarde.Waarde_Numeriek"].rename(cfg.RWS_TO_WAVE_VARS[code])
         da = da.drop_duplicates("time")
         # Parameter-level metadata (units, description, ...) stays on the variable
         da.attrs = {k: v for k, v in ds.attrs.items() if k not in station_attrs}
@@ -313,15 +306,15 @@ def waveheight_cm_to_m(ds):
     return ds
 
 def build_combined_dataset():
-    ds_grid = xr.open_zarr(str(GRID_PATH), consolidated=False)
+    ds_grid = xr.open_zarr(str(cfg.GRID_ZARR), consolidated=False)
 
     buoy_ids, buoy_lats, buoy_lons = [], [], []
     matched_lats, matched_lons = [], []
-    buoy_obs_by_var = {var: [] for var in BUOY_VARS}
-    residual_by_var = {var: [] for var in BUOY_VARS}
+    buoy_obs_by_var = {var: [] for var in cfg.WAVE_VARS}
+    residual_by_var = {var: [] for var in cfg.WAVE_VARS}
 
     stations = {}
-    for nc_path in sorted(BUOY_DIR.glob("*.nc")):
+    for nc_path in sorted(cfg.BUOY_DIR.glob("*.nc")):
         buoy_id = nc_path.stem.split('-.-')[0]
         buoy_grootheid = nc_path.stem.split('-.-')[1]
         if buoy_id in list(stations.keys()):
@@ -330,10 +323,6 @@ def build_combined_dataset():
             stations[buoy_id] = [buoy_grootheid]
 
     for station in list(stations.keys()):
-        #buoy_id = nc_path.stem
-        #buoy_ds = xr.open_dataset(nc_path)
-        #buoy_ds = rename_buoy_variables(buoy_ds)
-
         buoy_ds = load_station(station, stations[station])
         buoy_id = buoy_ds.attrs["station_id"]
         buoy_ds = waveheight_cm_to_m(buoy_ds)
@@ -358,7 +347,7 @@ def build_combined_dataset():
         matched_lats.append(matched_lat)
         matched_lons.append(matched_lon)
 
-        for var in BUOY_VARS:
+        for var in cfg.WAVE_VARS:
             buoy_obs_by_var[var].append(buoy_resampled[var].values)
             if var in grid_at_cell:
                 residual_by_var[var].append(buoy_resampled[var].values - grid_at_cell[var].values)
@@ -367,8 +356,8 @@ def build_combined_dataset():
 
     buoy_ds_combined = xr.Dataset(
         data_vars={
-            **{f"buoy_{var}": (("buoy_id", "time"), np.array(buoy_obs_by_var[var])) for var in BUOY_VARS},
-            **{f"residual_{var}": (("buoy_id", "time"), np.array(residual_by_var[var])) for var in BUOY_VARS},
+            **{f"buoy_{var}": (("buoy_id", "time"), np.array(buoy_obs_by_var[var])) for var in cfg.WAVE_VARS},
+            **{f"residual_{var}": (("buoy_id", "time"), np.array(residual_by_var[var])) for var in cfg.WAVE_VARS},
             "buoy_lat": (("buoy_id",), np.array(buoy_lats)),
             "buoy_lon": (("buoy_id",), np.array(buoy_lons)),
             "matched_grid_lat": (("buoy_id",), np.array(matched_lats)),
@@ -378,8 +367,8 @@ def build_combined_dataset():
     )
 
     ds_combined = xr.merge([ds_grid, buoy_ds_combined])
-    ds_combined.to_zarr(str(OUTPUT_ZARR), mode="w")
-    print(f"Saved combined dataset to {OUTPUT_ZARR}")
+    ds_combined.to_zarr(str(cfg.GRID_BUOYS_ZARR), mode="w")
+    print(f"Saved combined dataset to {cfg.GRID_BUOYS_ZARR}")
     return ds_combined
 
  
@@ -394,6 +383,7 @@ def to_arrays(ds):
  
  
 if __name__ == "__main__":
+    #build_dataset()
     build_combined_dataset()
 
     # Example: build a 24-hour-ahead forecasting dataset

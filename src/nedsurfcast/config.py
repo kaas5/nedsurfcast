@@ -14,20 +14,22 @@ PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 DOMAIN = dict(lon=slice(-4, 9), lat=slice(62, 51))  # note: lat often descending in ERA5
 
 START_DATE = dt.datetime(2024, 1, 1)
-END_DATE = dt.datetime(2024, 2, 1)
+END_DATE = dt.datetime(2025, 1, 1)
 DATE_RANGE = slice(START_DATE, END_DATE)
 
 TRAIN_END="2024-11-01"
 VAL_END="2024-12-01"
+LEAD_TIME_HOURS = 0
 
 WIND_VARS = ["u10", "v10", "msl"]       # ERA5: 10m wind components + mean sea level pressure
 WAVE_VARS = ["VHM0", "VTM10", "VMDR"]    # CMEMS WW3: sig. wave height, period, mean direction
-RWS_WAVE_VARS = ["Hm0", "Tm-10", "Th0"]   # golfhoogte (cm), golfperiode (s, spectraal moment, nadruk op swell), golfrichting (graad)
-
+RWS_WAVE_VARS = ["Hm0", "Tm-10", "Th0"]   # golfhoogte (cm), golfperiode (s, spectraal moment, m-10 nadruk op swell), golfrichting (graad)
+RWS_TO_WAVE_VARS = {"Hm0": "VHM0", "Tm-10": "VTM10", "Th0": "VMDR"}
 MODEL_OUTPUT_VARS = ["VHM0", "VTM10", "VMDR_sin", "VMDR_cos"]
-LEAD_TIME_HOURS = 0
 
-OUTPUT_ZARR = PROCESSED_DIR / "northsea_training_data_nowcast.zarr"
+GRID_ZARR = PROCESSED_DIR / "northsea_training_data_nowcast.zarr"
+GRID_BUOYS_ZARR = PROCESSED_DIR / "northsea_training_data_buoys_nowcast.zarr"
+BUOY_DIR = RAW_DIR / 'buoys'
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #DEVICE = "cpu"

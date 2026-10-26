@@ -27,11 +27,12 @@ def download_era5_wind_example():
             "product_type": "reanalysis",
             "variable": ["10m_u_component_of_wind", "10m_v_component_of_wind", "mean_sea_level_pressure"],
             "year": [str(y) for y in range(cfg.START_DATE.year, cfg.END_DATE.year + 1 if cfg.START_DATE.year == cfg.END_DATE.year else cfg.END_DATE.year)],
-            "month": [f"{m:02d}" for m in range(cfg.START_DATE.month, cfg.END_DATE.month)],
+            "month": [f"{m:02d}" for m in range(1, 13)],
             "day": [f"{d:02d}" for d in range(1, 32)],
             "time": [f"{h:02d}:00" for h in range(0, 24, 3)],
             "area": [62, -4, 51, 9],  # N, W, S, E
             "format": "netcdf",
+            "download_format": "unarchived",
         },
         str(cfg.RAW_DIR / "era5_wind_raw.nc"),
     )
@@ -40,7 +41,7 @@ def download_cmems_wave_example():
     """Example Copernicus Marine Toolbox call for the North West Shelf
     WW3 reanalysis product. Requires `copernicusmarine login` once."""
     import copernicusmarine
-    copernicusmarine.login(username='', password='')
+    copernicusmarine.login(username='', password='', force_overwrite=True)
  
     copernicusmarine.subset(
         dataset_id="MetO-NWS-WAV-RAN",  # example North West Shelf WW3 hindcast dataset id — verify current id on CMEMS catalog
@@ -132,6 +133,6 @@ def debug_station_grootheid():
     return
 
 if __name__=='__main__':
-    #download_era5_wind_example()
-    #download_cmems_wave_example()
-    download_buoys()
+    download_era5_wind_example()
+    download_cmems_wave_example()
+    #download_buoys()

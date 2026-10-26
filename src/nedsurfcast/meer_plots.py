@@ -23,13 +23,14 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+
+import config as cfg
  
-ZARR_PATH = Path("data/processed/northsea_training_data_nowcast_buoys.zarr")
 HEIGHT_VAR = "VHM0"
 DIR_VAR = "VMDR"
  
  
-def load(zarr_path: Path = ZARR_PATH) -> xr.Dataset:
+def load(zarr_path: Path = cfg.GRID_BUOYS_ZARR) -> xr.Dataset:
     return xr.open_zarr(str(zarr_path), consolidated=False)
  
  
@@ -145,5 +146,5 @@ if __name__ == "__main__":
     plot_locations(ds, lat_range=(51.3, 56.0), lon_range=(2.0,8.0))
     plot_buoy_timeseries(ds, 'vlaktevanderaan.2-2639')
     #for buoy_id in ds.buoy_id.values:
-        #plot_buoy_timeseries(ds, buoy_id)#vlaktevanderaan.2-2639
+    #    plot_buoy_timeseries(ds, buoy_id)#vlaktevanderaan.2-2639
  
