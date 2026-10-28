@@ -22,6 +22,7 @@ import xarray as xr
 from torch.utils.data import Dataset, DataLoader
 
 import config as cfg
+from preprocess_dataset import add_direction_sin_cos
  
 # ---------------------------------------------------------------------------
 # 0. CONFIG
@@ -54,8 +55,8 @@ class NorthSeaSwellDataset(Dataset):
  
     def __init__(self, zarr_path: Path, time_slice: slice, history_len: int = cfg.HISTORY_LEN):
         ds = xr.open_zarr(str(zarr_path), consolidated=False)
-        ds = ds.sel(time=time_slice)
- 
+        ds = add_direction_sin_cos(ds.sel(time=time_slice))  # VMDR is stored in degrees
+
         # Load into memory as numpy arrays up front. This is only safe
         # because we've already coarsened the grid — for a much larger
         # domain/resolution, keep this lazy (dask-backed) and slice inside

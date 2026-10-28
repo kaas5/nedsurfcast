@@ -127,8 +127,7 @@ def plot_buoy_timeseries(ds: xr.Dataset, buoy_id: str):
     # Direction: plot sin component only, since raw degrees would show
     # fake 360->0 discontinuities that look like data problems but aren't
     axes[2].plot(ds.time, np.sin(np.deg2rad(b[f"buoy_{DIR_VAR}"])), label="Buoy sin(direction)", linewidth=0.8)
-    #axes[2].plot(ds.time, np.sin(np.deg2rad(grid_at_cell['VMDR_sin'])), label="WW3 sin(direction)", linewidth=0.8, alpha=0.8)
-    axes[2].plot(ds.time, grid_at_cell['VMDR_sin'], label="WW3 sin(direction)", linewidth=0.8, alpha=0.8)
+    axes[2].plot(ds.time, np.sin(np.deg2rad(grid_at_cell[DIR_VAR])), label="WW3 sin(direction)", linewidth=0.8, alpha=0.8)
     axes[2].set_ylabel("sin(direction)")
     axes[2].set_xlabel("Time")
     axes[2].legend()

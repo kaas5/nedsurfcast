@@ -25,7 +25,7 @@ WIND_VARS = ["u10", "v10", "msl"]       # ERA5: 10m wind components + mean sea l
 WAVE_VARS = ["VHM0", "VTM10", "VMDR"]    # CMEMS WW3: sig. wave height, period, mean direction
 RWS_WAVE_VARS = ["Hm0", "Tm-10", "Th0"]   # golfhoogte (cm), golfperiode (s, spectraal moment, m-10 nadruk op swell), golfrichting (graad)
 RWS_TO_WAVE_VARS = {"Hm0": "VHM0", "Tm-10": "VTM10", "Th0": "VMDR"}
-MODEL_OUTPUT_VARS = ["VHM0", "VTM10", "VMDR_sin", "VMDR_cos"]
+MODEL_OUTPUT_VARS = ["VHM0", "VTM10", "VMDR_sin", "VMDR_cos"]  # CNN targets; sin/cos are derived from VMDR (degrees) on load
 
 GRID_ZARR = PROCESSED_DIR / "northsea_training_data_nowcast.zarr"
 GRID_BUOYS_ZARR = PROCESSED_DIR / "northsea_training_data_buoys_nowcast.zarr"
@@ -71,6 +71,13 @@ BUOY_IGNORE_LIST = ['honte.kaloot',
                     'stortemelk.west']
 
 RWS_VALID_QUALITY_CODES = ['00']  # 00 = normal value, 99 = missing/unreliable
-MAX_WAVE_HEIGHT_M = 20.0          # anything above this at a Dutch buoy is a measurement error
+# Physically plausible (min, max) per buoy variable; values outside are measurement errors or fill values
+VALID_RANGE = {
+    "VHM0": (0.0, 20.0),    # m
+    "VTM10": (1.0, 25.0),   # s
+    "VMDR": (0.0, 360.0),   # degrees
+}
+
+DUTCH_COAST = dict(lat=(51.2, 53.9), lon=(2.5, 7.3))  # (min, max) box for gridded residual predictions
 
 BUOY_GROUP_DISTANCE_KM = 15.0     # buoys whose matched cells are closer than this are held out together
