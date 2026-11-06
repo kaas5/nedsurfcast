@@ -1,14 +1,21 @@
+"""
+Shared configuration for the nowcast and forecast pipelines
+=============================================================
+
+Pipeline-specific settings live in nowcast/config.py and forecast/config.py.
+"""
+
 from pathlib import Path
-import torch
 import datetime as dt
- 
+
 # ---------------------------------------------------------------------------
-# 0. CONFIG — adjust to your setup
+# 0. PATHS — absolute, so scripts work from any working directory
 # ---------------------------------------------------------------------------
 
-RAW_DIR = Path("data/raw")
-PROCESSED_DIR = Path("data/processed")
-PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+ROOT = Path(__file__).resolve().parents[2]
+RAW_DIR = ROOT / "data" / "raw"
+PROCESSED_DIR = ROOT / "data" / "processed"
+BUOY_DIR = RAW_DIR / "buoys"
 
 # North Sea bounding box (lon_min, lon_max, lat_min, lat_max)
 DOMAIN = dict(lon=slice(-4, 9), lat=slice(62, 51))  # note: lat often descending in ERA5
@@ -17,37 +24,23 @@ START_DATE = dt.datetime(2024, 1, 1)
 END_DATE = dt.datetime(2025, 1, 1)
 DATE_RANGE = slice(START_DATE, END_DATE)
 
-TRAIN_END="2024-11-01"
-VAL_END="2024-12-01"
-LEAD_TIME_HOURS = 0
+DUTCH_COAST = dict(lat=(51.2, 53.9), lon=(2.5, 7.3))  # (min, max) box for gridded residual predictions
 
-WIND_VARS = ["u10", "v10", "msl"]       # ERA5: 10m wind components + mean sea level pressure
-WAVE_VARS = ["VHM0", "VTM10", "VMDR"]    # CMEMS WW3: sig. wave height, period, mean direction
+# ---------------------------------------------------------------------------
+# 1. RWS BUOYS
+# ---------------------------------------------------------------------------
+
+WAVE_VARS = ["VHM0", "VTM10", "VMDR"]    # sig. wave height, period, mean direction (CMEMS names, also used for the buoys)
 RWS_WAVE_VARS = ["Hm0", "Tm-10", "Th0"]   # golfhoogte (cm), golfperiode (s, spectraal moment, m-10 nadruk op swell), golfrichting (graad)
 RWS_TO_WAVE_VARS = {"Hm0": "VHM0", "Tm-10": "VTM10", "Th0": "VMDR"}
-MODEL_OUTPUT_VARS = ["VHM0", "VTM10", "VMDR_sin", "VMDR_cos"]  # CNN targets; sin/cos are derived from VMDR (degrees) on load
-
-GRID_ZARR = PROCESSED_DIR / "northsea_training_data_nowcast.zarr"
-GRID_BUOYS_ZARR = PROCESSED_DIR / "northsea_training_data_buoys_nowcast.zarr"
-BUOY_DIR = RAW_DIR / 'buoys'
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#DEVICE = "cpu"
-
-WAVE_COARSEN_FACTOR = 3  # e.g. 3 -> ~4.5 km cells, ~9x less memory than native 1.5 km
-
-""" Model training parameters """
-HISTORY_LEN = 4          # number of past wind timesteps stacked as input channels
-BEST_MODEL_NAME = 'best_model_nowcast.pt'
-
 
 BUOY_IGNORE_LIST = ['honte.kaloot',
-                    'pasvanterneuzen', 
-                    'vaarwaterlangshoofdplaat', 
+                    'pasvanterneuzen',
+                    'vaarwaterlangshoofdplaat',
                     'vaarwaterlangshoofdplaat.4',
-                    'valkenisse.overloop.nabijboei65a', 
-                    'marollegat', 
-                    'keeten', 
+                    'valkenisse.overloop.nabijboei65a',
+                    'marollegat',
+                    'keeten',
                     'oosterschelde.4',
                     'hansweert.2',
                     'hansweert.2overloop',
@@ -77,25 +70,5 @@ VALID_RANGE = {
     "VTM10": (1.0, 25.0),   # s
     "VMDR": (0.0, 360.0),   # degrees
 }
-
-DUTCH_COAST = dict(lat=(51.2, 53.9), lon=(2.5, 7.3))  # (min, max) box for gridded residual predictions
-
-""" Archived NOAA GFS-Wave (WAVEWATCH III) forecasts, s3://noaa-gfs-bdp-pds (available from 2021-03) """
-GFSWAVE_URL = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
-GFSWAVE_GRID = "global.0p25"     # global.0p16 stops at 52.5N, atlocn.0p16 is the western Atlantic only
-GFSWAVE_CYCLES = [0]             # issue hours per day (0, 6, 12, 18 available)
-GFSWAVE_LEAD_HOURS = list(range(0, 73, 3))
-# GRIB messages to keep, as "<VAR>:<level>" in the .idx files; each message is the full global field
-GFSWAVE_FIELDS = [
-    "HTSGW:surface",             # significant wave height (m)
-    "PERPW:surface",             # peak period (s)
-    "DIRPW:surface",             # peak direction (deg)
-    "UGRD:surface",              # 10 m wind forcing (m/s)
-    "VGRD:surface",
-    "SWELL:1 in sequence",       # primary swell partition: height, period, direction
-    "SWPER:1 in sequence",
-    "SWDIR:1 in sequence",
-]
-GFSWAVE_DIR = RAW_DIR / "gfswave"
 
 BUOY_GROUP_DISTANCE_KM = 15.0     # buoys whose matched cells are closer than this are held out together

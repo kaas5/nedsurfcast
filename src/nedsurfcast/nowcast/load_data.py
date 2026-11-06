@@ -6,7 +6,7 @@ Shared by residual_regression.py (cross-validation on the buoys) and
 predict_residual.py (gridded prediction). Both build their features with
 build_features(), so a grid cell is treated exactly like a buoy's matched cell.
 
-The Zarr itself is written by preprocess_dataset.build_combined_dataset().
+The Zarr itself is written by nowcast/preprocess.build_combined_dataset().
 """
 
 from pathlib import Path
@@ -14,17 +14,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
-from scipy.cluster.hierarchy import fcluster, linkage
 
-import config as cfg
+from nedsurfcast import config as cfg
+from nedsurfcast.common.grouping import buoy_groups
+from nedsurfcast.nowcast import config as ncfg
 
 TARGET = "VHM0"                                  # start with wave height; direction needs circular residuals
 WW3_FEATURES = cfg.WAVE_VARS                     # WW3 local sea state
-WIND_FEATURES = cfg.WIND_VARS                    # ERA5 at the matched cell
+WIND_FEATURES = ncfg.WIND_VARS                   # ERA5 at the matched cell
 LAG_STEPS = [1, 2, 4]                            # in dataset time steps (e.g. 3 h each)
 
 
-def load(zarr_path: Path = cfg.GRID_BUOYS_ZARR) -> xr.Dataset:
+def load(zarr_path: Path = ncfg.GRID_BUOYS_ZARR) -> xr.Dataset:
     return xr.open_zarr(str(zarr_path), consolidated=False)
 
 
@@ -69,7 +70,7 @@ def build_features(local: xr.Dataset) -> xr.Dataset:
 
     f["wind_u"], f["wind_v"] = local["u10"], local["v10"]
     f["wind_speed"] = np.hypot(local["u10"], local["v10"])
-    f["msl_hpa"] = local["msl"] * 1000.0  # msl is stored in Pa / 100,000 (see preprocess_dataset.normalize_pressure)
+    f["msl_hpa"] = local["msl"] * 1000.0  # msl is stored in Pa / 100,000 (see nowcast/preprocess.normalize_pressure)
 
     # Recent history: swell reflects wind over the previous hours/days, not just the current wind
     for k in LAG_STEPS:
@@ -79,18 +80,6 @@ def build_features(local: xr.Dataset) -> xr.Dataset:
         f[f"msl_tend{k}"] = f["msl_hpa"] - f["msl_hpa"].shift(time=k)  # pressure tendency: storm approaching or leaving
 
     return xr.Dataset(f)
-
-
-def buoy_groups(ds: xr.Dataset, target: str = TARGET, max_km: float = cfg.BUOY_GROUP_DISTANCE_KM) -> pd.Series:
-    """Single-linkage clusters of matched grid cells: a buoy joins a group when its cell is within
-    max_km of any member. Buoys sharing a cell always end up together (distance 0)."""
-    # Buoys without observations would otherwise chain neighbouring groups together
-    ds = ds.sel(buoy_id=ds[f"buoy_{target}"].notnull().any("time").compute())
-    lat, lon = ds["matched_grid_lat"].values, ds["matched_grid_lon"].values
-    # Equirectangular km coordinates, accurate enough over the North Sea
-    xy = np.column_stack([lon * 111.32 * np.cos(np.deg2rad(lat.mean())), lat * 110.57])
-    labels = fcluster(linkage(xy, method="single"), t=max_km, criterion="distance")
-    return pd.Series(labels, index=ds["buoy_id"].values, name="buoy_group")
 
 
 def feature_columns(df: pd.DataFrame) -> list[str]:

@@ -1,43 +1,22 @@
 """
-Residual models and validation schemes
-========================================
+Validation schemes and skill scores for residual models
+=========================================================
 
-MODELS maps a name to a factory that returns a fresh, unfitted model, so
-every fold starts from scratch. SCHEMES maps a name to a function that
-returns out-of-sample predictions for every row of the pooled table.
+Every scheme returns out-of-sample predictions for every row of a pooled
+table with a "target" column (the residual), a "buoy_group" column and a
+"time" index level.
 """
 
 import numpy as np
 import pandas as pd
-from sklearn.dummy import DummyRegressor
-from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import Ridge
 from sklearn.model_selection import LeaveOneGroupOut
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
 
 N_TIME_BLOCKS = 5
 TIME_GAP_HOURS = 24                              # buffer around each test block to limit autocorrelation leakage
 
 
 # ---------------------------------------------------------------------------
-# 1. MODELS (all start from the same two baselines)
-# ---------------------------------------------------------------------------
-
-MODELS = {
-    # Constant offset: how much of the error is plain average bias? Any real model must beat this.
-    "mean-bias": lambda: DummyRegressor(strategy="mean"),
-    "ridge": lambda: make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), Ridge(alpha=10.0)),
-    # Small, heavily regularized trees; handles NaN (lags at the start, gaps) natively
-    "hist-gbr": lambda: HistGradientBoostingRegressor(
-        max_depth=3, learning_rate=0.05, max_iter=200, min_samples_leaf=50, l2_regularization=1.0
-    ),
-}
-
-
-# ---------------------------------------------------------------------------
-# 2. VALIDATION SCHEMES
+# 1. VALIDATION SCHEMES
 # ---------------------------------------------------------------------------
 
 # Nearby buoys see (almost) the same conditions, so a whole group is held out at once
@@ -73,3 +52,23 @@ SCHEMES = {
     "leave-one-group": evaluate_leave_one_group_out,
     "blocked-time": evaluate_blocked_time,
 }
+
+
+# ---------------------------------------------------------------------------
+# 2. SCORES
+# ---------------------------------------------------------------------------
+
+def rmse(x) -> float:
+    return float(np.sqrt(np.mean(np.square(x))))
+
+
+def summarize(name: str, scheme: str, df: pd.DataFrame, pred: pd.Series):
+    ok = pred.notna()
+    raw_err = df.loc[ok, "target"]        # error of the uncorrected model
+    new_err = raw_err - pred[ok]          # error of model + predicted correction
+    r_raw, r_new = rmse(raw_err), rmse(new_err)
+    print(
+        f"{scheme:<15} {name:<10} n={int(ok.sum()):>6}  "
+        f"RMSE raw={r_raw:.3f} corrected={r_new:.3f}  skill={1 - r_new / r_raw:+.3f}  "
+        f"bias raw={raw_err.mean():+.3f} corrected={new_err.mean():+.3f}"
+    )

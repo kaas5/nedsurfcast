@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from load_data import TARGET
+from nedsurfcast.nowcast.load_data import TARGET
 
 RESIDUAL_LABEL = "buoy - WW3 (m)"
 

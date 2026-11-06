@@ -24,13 +24,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 
-import config as cfg
- 
+from nedsurfcast.nowcast import config as ncfg
+
 HEIGHT_VAR = "VHM0"
 DIR_VAR = "VMDR"
- 
- 
-def load(zarr_path: Path = cfg.GRID_BUOYS_ZARR) -> xr.Dataset:
+
+
+def load(zarr_path: Path = ncfg.GRID_BUOYS_ZARR) -> xr.Dataset:
     return xr.open_zarr(str(zarr_path), consolidated=False)
  
  

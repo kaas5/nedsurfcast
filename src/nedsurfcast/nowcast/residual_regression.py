@@ -15,11 +15,13 @@ what would let it generalize to grid cells that have no buoy.
 
 Two validation schemes answer two different questions:
   - leave-one-group-out: does the correction transfer to an unseen LOCATION?
-                         (nearby buoys are held out together, see load_data.buoy_groups)
+                         (nearby buoys are held out together, see common/grouping.py)
   - blocked-time       : does it transfer to unseen WEATHER (other time periods)?
 
-Data loading/features live in load_data.py, models and validation schemes
-in models.py, figures in plot.py.
+Data loading/features live in load_data.py, models in models.py, figures in
+plot.py, validation schemes and scores in common/validation.py.
+
+Run from anywhere with: python -m nedsurfcast.nowcast.residual_regression
 
 Prerequisites (pip install):
     scikit-learn scipy pandas xarray zarr numpy matplotlib
@@ -33,30 +35,15 @@ against WW3 values from a different real time, corrupting every residual.
 import numpy as np
 import pandas as pd
 
-from load_data import build_table, feature_columns, load
-from models import MODELS, SCHEMES
-from plot import plot_pred_vs_actual
+from nedsurfcast.common.validation import SCHEMES, summarize
+from nedsurfcast.nowcast.load_data import build_table, feature_columns, load
+from nedsurfcast.nowcast.models import MODELS
+from nedsurfcast.nowcast.plot import plot_pred_vs_actual
 
 
 # ---------------------------------------------------------------------------
 # 1. REPORTING
 # ---------------------------------------------------------------------------
-
-def rmse(x) -> float:
-    return float(np.sqrt(np.mean(np.square(x))))
-
-
-def summarize(name: str, scheme: str, df: pd.DataFrame, pred: pd.Series):
-    ok = pred.notna()
-    raw_err = df.loc[ok, "target"]        # error of uncorrected WW3
-    new_err = raw_err - pred[ok]          # error of WW3 + predicted correction
-    r_raw, r_new = rmse(raw_err), rmse(new_err)
-    print(
-        f"{scheme:<15} {name:<10} n={int(ok.sum()):>6}  "
-        f"RMSE raw={r_raw:.3f} corrected={r_new:.3f}  skill={1 - r_new / r_raw:+.3f}  "
-        f"bias raw={raw_err.mean():+.3f} corrected={new_err.mean():+.3f}"
-    )
-
 
 def _rmse_table(d: pd.DataFrame, grouper) -> pd.DataFrame:
     g = d.assign(sq_raw=d["err_raw"] ** 2, sq_new=d["err_new"] ** 2).groupby(grouper, observed=True)

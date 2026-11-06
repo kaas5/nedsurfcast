@@ -1,29 +1,33 @@
 """
 North Sea swell prediction — data pipeline skeleton
 =====================================================
- 
+
 Goes from raw ERA5 wind NetCDF files + CMEMS WAVEWATCH III NetCDF files
-to a single aligned, regridded Zarr store ready for ML training.
- 
+to a single aligned, regridded Zarr store ready for ML training, then adds
+the RWS buoys (loaded and cleaned with common/buoys.py).
+
 Prerequisites (pip install):
     xarray netCDF4 xesmf dask zarr cdsapi copernicusmarine numpy
- 
+
 This script assumes you've already downloaded the raw files locally
-(see the download stubs below for how to do that with cdsapi /
-copernicusmarine). It focuses on the processing pipeline itself.
+(see download/era5.py, download/cmems.py and download/rws.py).
+It focuses on the processing pipeline itself.
 """
- 
+
 import xarray as xr
 #import xesmf as xe
 import numpy as np
-from scipy.spatial import cKDTree
-import datetime as dt
-import config as cfg
- 
+
+from nedsurfcast import config as cfg
+from nedsurfcast.common.angles import add_direction_sin_cos, wrap_angle
+from nedsurfcast.common.buoys import (list_stations, load_station, mask_out_of_range, match_to_sea_cell,
+                                      resample_buoy_to_grid_time, waveheight_cm_to_m)
+from nedsurfcast.nowcast import config as ncfg
+
 # ---------------------------------------------------------------------------
 # 2. LOAD
 # ---------------------------------------------------------------------------
- 
+
 def _normalize_era5(ds):
     # Newer CDS API downloads use "valid_time" instead of "time", and
     # "longitude"/"latitude" instead of "lon"/"lat". Handle both.
@@ -45,10 +49,10 @@ def _normalize_era5(ds):
 
 
 def load_wind():
-    """Load the monthly ERA5 files (era5_wind_YYYY_MM.nc, see download.py) as one dataset along time."""
-    files = sorted(cfg.RAW_DIR.glob("era5_wind_[0-9][0-9][0-9][0-9]_[0-9][0-9].nc"))
+    """Load the monthly ERA5 files (era5_wind_YYYY_MM.nc, see download/era5.py) as one dataset along time."""
+    files = sorted(ncfg.ERA5_DIR.glob("era5_wind_[0-9][0-9][0-9][0-9]_[0-9][0-9].nc"))
     if not files:
-        raise FileNotFoundError(f"No monthly ERA5 files (era5_wind_YYYY_MM.nc) found in {cfg.RAW_DIR}")
+        raise FileNotFoundError(f"No monthly ERA5 files (era5_wind_YYYY_MM.nc) found in {ncfg.ERA5_DIR}")
 
     months = [_normalize_era5(xr.open_dataset(f, chunks={})) for f in files]
     ds = xr.concat(months, dim="time", data_vars="minimal", coords="minimal", compat="override")
@@ -59,11 +63,11 @@ def load_wind():
 
     ds = ds.chunk({"time": 24})
     return ds
- 
- 
+
+
 def load_waves():
     ds = xr.open_mfdataset(
-        str(cfg.RAW_DIR / "ww3_northsea*.nc"),
+        str(ncfg.CMEMS_DIR / "ww3_northsea*.nc"),
         combine="by_coords",
         chunks={"time": 24},
     )
@@ -71,12 +75,12 @@ def load_waves():
     if "longitude" in ds.coords:
         ds = ds.rename({"longitude": "lon", "latitude": "lat"})
     return ds
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # 3. SUBSET TO DOMAIN + DATE RANGE (do this before heavy computation)
 # ---------------------------------------------------------------------------
- 
+
 def subset(ds):
     sel_kwargs = {"time": cfg.DATE_RANGE}
     if ds.lat.values[0] < ds.lat.values[-1]:
@@ -85,12 +89,12 @@ def subset(ds):
         sel_kwargs["lat"] = cfg.DOMAIN["lat"]
     sel_kwargs["lon"] = cfg.DOMAIN["lon"]
     return ds.sel(**sel_kwargs)
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # 4. REGRID WIND ONTO THE WAVE GRID (reuse weights after first run)
 # ---------------------------------------------------------------------------
- 
+
 def regrid_wind_to_wave_grid(ds_wind, ds_wave):
     # reuse = cfg.REGRID_WEIGHTS_FILE.exists()
     # regridder = xe.Regridder(
@@ -102,8 +106,8 @@ def regrid_wind_to_wave_grid(ds_wind, ds_wave):
     ds_wind_regridded = ds_wind.interp_like(ds_wave, method="linear")
     return ds_wind_regridded
     #return regridder(ds_wind[cfg.WIND_VARS])
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # 4. COARSEN THE WAVE GRID, THEN REGRID WIND ONTO IT
 # ---------------------------------------------------------------------------
@@ -117,7 +121,7 @@ def regrid_wind_to_wave_grid(ds_wind, ds_wave):
 # keeps meaningfully more coastal/shelf detail than ERA5's own resolution,
 # while cutting the wave grid's memory footprint by roughly factor^2.
 
-def coarsen_waves(ds_wave, factor: int = cfg.WAVE_COARSEN_FACTOR):
+def coarsen_waves(ds_wave, factor: int = ncfg.WAVE_COARSEN_FACTOR):
     # Direction needs a circular mean: averaging degrees turns 350 and 10 into 180 instead of 0
     ds_wave = add_direction_sin_cos(ds_wave).drop_vars("VMDR")
     coarse = ds_wave.coarsen(lat=factor, lon=factor, boundary="trim").mean()
@@ -125,12 +129,12 @@ def coarsen_waves(ds_wave, factor: int = cfg.WAVE_COARSEN_FACTOR):
     return coarse.drop_vars(["VMDR_sin", "VMDR_cos"])
 
 def regrid_wind_to_wave_grid(ds_wind, ds_wave_coarse):
-    return ds_wind[cfg.WIND_VARS].interp_like(ds_wave_coarse, method="linear")
+    return ds_wind[ncfg.WIND_VARS].interp_like(ds_wave_coarse, method="linear")
 
 # ---------------------------------------------------------------------------
 # 5. TEMPORAL ALIGNMENT — build forecast lead-time offset here if needed
 # ---------------------------------------------------------------------------
- 
+
 def align_time(ds_wind, ds_wave, lead_time_hours: int = 0):
     """If lead_time_hours > 0, shift wave labels forward relative to wind
     features so the ML task becomes a genuine forecast, not a nowcast:
@@ -142,19 +146,6 @@ def align_time(ds_wind, ds_wave, lead_time_hours: int = 0):
     common_times = np.intersect1d(ds_wind.time.values, ds_wave.time.values)
     return ds_wind.sel(time=common_times), ds_wave.sel(time=common_times)
 
-# 2-component continuous representation of VMDR, for averaging and as model input/output.
-# The datasets on disk store VMDR in degrees, like the buoys.
-def add_direction_sin_cos(ds_wave):
-    theta_rad = np.deg2rad(ds_wave["VMDR"])
-    ds_wave = ds_wave.copy()
-    ds_wave["VMDR_sin"] = np.sin(theta_rad)
-    ds_wave["VMDR_cos"] = np.cos(theta_rad)
-    return ds_wave
-
-# Angular difference in [-180, 180): 350 - 10 is -20, not 340
-def wrap_angle(deg):
-    return (deg + 180) % 360 - 180
-
 # The pressure is given in an order of magnitude 100,000. Divide by 100,000 to stabilize training
 def normalize_pressure(ds_wind):
     ds_wind["msl"] = ds_wind["msl"] / 100000
@@ -165,11 +156,11 @@ def normalize_pressure(ds_wind):
 # ---------------------------------------------------------------------------
 # 6. MERGE FEATURES + LABELS, SANITY CHECK, WRITE TO ZARR
 # ---------------------------------------------------------------------------
- 
+
 def build_dataset(lead_time_hours: int = 0):
     ds_wind = load_wind()
     ds_wave = load_waves()
-    
+
     print('data dimensions')
     print(ds_wind.dims)
     print(ds_wave.dims)
@@ -186,17 +177,17 @@ def build_dataset(lead_time_hours: int = 0):
     print(f"features: {list(ds_wind_regridded.keys())}, labels: {list(ds_wave_coarse.keys())}")
     print("Wind time sample:", ds_wind_regridded.time.values[:3])
     print("Wave time sample:", ds_wave_coarse.time.values[:3])
- 
+
     ds_wind_aligned, ds_wave_aligned = align_time(ds_wind_regridded, ds_wave_coarse, lead_time_hours)
- 
+
     ds_combined = xr.merge([ds_wind_aligned, ds_wave_aligned[cfg.WAVE_VARS]])
     ds_combined = ds_combined.chunk({"time": 24, "lat": -1, "lon": -1})
- 
-    ds_combined.to_zarr(str(cfg.GRID_ZARR), mode="w")
-    print(f"Saved aligned training data to {cfg.GRID_ZARR}")
+
+    ds_combined.to_zarr(str(ncfg.GRID_ZARR), mode="w")
+    print(f"Saved aligned training data to {ncfg.GRID_ZARR}")
     return ds_combined
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # 7. CHRONOLOGICAL TRAIN / VAL / TEST SPLIT (never shuffle randomly)
 # ---------------------------------------------------------------------------
@@ -206,169 +197,18 @@ def chronological_split(ds, train_end, val_end):
     train = ds.sel(time=slice(None, train_end))
     val = ds.sel(time=slice(train_end, val_end))
     test = ds.sel(time=slice(val_end, None))
-    return train, val, test 
+    return train, val, test
 
-
-def rename_buoy_variables(buoy_ds: xr.Dataset):
-    buoy_ds.attrs["lat"] = buoy_ds.attrs.pop("Lat")
-    buoy_ds.attrs["lon"] = buoy_ds.attrs.pop("Lon")
-    
-    if buoy_ds.attrs['Grootheid.Code'] == 'Hm0':
-        buoy_ds.attrs['Grootheid.Code'] = 'VHM0'
-    elif buoy_ds.attrs['Grootheid.Code'] == 'Tm-10':
-        buoy_ds.attrs['Grootheid.Code'] = 'VTM10'
-    elif buoy_ds.attrs['Grootheid.Code'] == 'Th0':
-        buoy_ds.attrs['Grootheid.Code'] = 'VMDR'
-    else:
-        print('Fout in Grootheid.Code, code is:', buoy_ds.attrs['Grootheid.Code'])
-
-    rename_map = {}
-    if "Meetwaarde.Waarde_Numeriek" in buoy_ds.data_vars:
-        rename_map["Meetwaarde.Waarde_Numeriek"] = buoy_ds.attrs['Grootheid.Code']
-    buoy_ds = buoy_ds.rename(rename_map)
-
-    return buoy_ds    
-        
-# Grid values are instantaneous, so average the buoy over [t-90min, t+90min) and label it t.
-# offset alone only moves the bin edges; the labels stay at the bin start, hence the shift.
-def resample_centered(da: xr.DataArray) -> xr.DataArray:
-    out = da.resample(time="3h", offset="-90min").mean()
-    return out.assign_coords(time=out.time + np.timedelta64(90, "m"))
-
-def resample_buoy_to_grid_time(buoy_ds: xr.Dataset, target_time: np.ndarray) -> xr.Dataset:
-    """Resample a buoy's (likely finer-sampled) time series onto the
-    gridded data's timestamps. Direction uses a circular mean via
-    sin/cos decomposition; everything else uses a plain mean."""
-    resampled = {}
-    #print('hallo', buoy_ds.attrs['Grootheid.Code'])
-    print('buoy_data_vars', buoy_ds.data_vars)
-    for var in cfg.WAVE_VARS:
-        if var not in buoy_ds:
-            resampled[var] = np.full(len(target_time), np.nan)
-            continue
-
-        if var == "VMDR":
-            rad = np.deg2rad(buoy_ds[var])
-            sin_mean = resample_centered(np.sin(rad))
-            cos_mean = resample_centered(np.cos(rad))
-            circular_mean = (np.rad2deg(np.arctan2(sin_mean, cos_mean)) % 360)
-            resampled[var] = circular_mean.reindex(time=target_time).values
-        else:
-            grouped = resample_centered(buoy_ds[var])
-            resampled[var] = grouped.reindex(time=target_time).values
-
-    return xr.Dataset(
-        {var: (("time",), vals) for var, vals in resampled.items()},
-        coords={"time": target_time},
-    )
-
-def match_to_sea_cell(ds_grid: xr.Dataset, buoy_lat: float, buoy_lon: float):
-    """Nearest valid (non-land) grid cell — reuses the sea-mask-aware
-    matching approach from earlier, since the naive nearest-cell lookup
-    can land on a masked land cell near the coast."""
-    sea_mask = ds_grid["VHM0"].isel(time=0).notnull().values
-    lat2d, lon2d = np.meshgrid(ds_grid.lat.values, ds_grid.lon.values, indexing="ij")
-    sea_points = np.column_stack([lat2d[sea_mask], lon2d[sea_mask]])
-
-    tree = cKDTree(sea_points)
-    _, idx = tree.query([buoy_lat, buoy_lon])
-    matched_lat, matched_lon = sea_points[idx]
-    return float(matched_lat), float(matched_lon)
-
-def combine_station_grootheid(station_name: str, station_grootheid_list: list):
-    parts = []
-    for grootheid in station_grootheid_list:
-        ds = xr.open_dataset(str(cfg.BUOY_DIR / f'{station_name}-.-{grootheid}.nc'))
-        code = str(ds["Grootheid.Code"].values.flat[0])  # preserved via always_preserve; check how it's stored in your files
-        parts.append(ds["Meetwaarde.Waarde_Numeriek"].rename(cfg.RWS_TO_WAVE_VARS[code]).to_dataset())
-    return xr.merge(parts)  # outer join on time, NaN where a code has no value at that time
-
-def _attrs_equal(a, b) -> bool:
-    try:
-        return bool(np.array_equal(a, b))
-    except Exception:
-        return False
-
-QUALITY_CODE = "WaarnemingMetadata.Kwaliteitswaardecode"
-
-# RWS marks missing/unreliable measurements with quality code 99 (value 99999).
-# ddlpy stores the code as an attribute instead of a variable when it is constant in a file.
-def mask_bad_quality(da: xr.DataArray, ds: xr.Dataset) -> xr.DataArray:
-    if QUALITY_CODE in ds.data_vars:
-        return da.where(ds[QUALITY_CODE].isin(cfg.RWS_VALID_QUALITY_CODES))
-    if str(ds.attrs.get(QUALITY_CODE)) in cfg.RWS_VALID_QUALITY_CODES:
-        return da
-    return da.where(False)
-
-def load_station(station_id: str, station_grootheid_list: list) -> xr.Dataset:
-    files = []
-    for grootheid in station_grootheid_list:
-        files.append(str(cfg.BUOY_DIR / f'{station_id}-.-{grootheid}.nc'))
-
-    datasets = [xr.open_dataset(f) for f in sorted(files)]
-
-    # Station-level attrs = keys present with identical values in every file
-    first = datasets[0].attrs
-    station_attrs = {
-        k: v for k, v in first.items()
-        if all(k in d.attrs and _attrs_equal(d.attrs[k], v) for d in datasets[1:])
-    }
-
-    parts = []
-    for ds in datasets:
-        code = str(ds["Grootheid.Code"].values.flat[0])  # check how this is stored in your files
-        if code not in cfg.RWS_TO_WAVE_VARS:
-            continue
-        da = ds["Meetwaarde.Waarde_Numeriek"].rename(cfg.RWS_TO_WAVE_VARS[code])
-        da = mask_bad_quality(da, ds)
-        da = da.drop_duplicates("time")
-        # Parameter-level metadata (units, description, ...) stays on the variable
-        da.attrs = {k: v for k, v in ds.attrs.items() if k not in station_attrs}
-        parts.append(da.to_dataset())
-
-    merged = xr.merge(parts, combine_attrs="drop")  # outer join on time; NaN where a code has no value
-    merged.attrs = station_attrs                    # station metadata lives on the Dataset
-    merged.attrs["station_id"] = station_id
-    return merged
-
-def waveheight_cm_to_m(ds):
-    if 'VHM0' in ds.data_vars:
-        ds['VHM0'] = ds['VHM0'] / 100 
-        print('VHM0 in data_vars')
-        return ds
-    print('VHM0 NIET in data_vars')
-    return ds
-
-# Fill values and spikes that passed the quality code check, e.g. 19.4 m at borsselealpha or 9999.9 s periods
-def mask_out_of_range(ds):
-    for var, (lo, hi) in cfg.VALID_RANGE.items():
-        if var in ds.data_vars:
-            ds[var] = ds[var].where((ds[var] >= lo) & (ds[var] <= hi))
-    return ds
 
 def build_combined_dataset():
-    ds_grid = xr.open_zarr(str(cfg.GRID_ZARR), consolidated=False)
+    ds_grid = xr.open_zarr(str(ncfg.GRID_ZARR), consolidated=False)
 
     buoy_ids, buoy_lats, buoy_lons = [], [], []
     matched_lats, matched_lons = [], []
     buoy_obs_by_var = {var: [] for var in cfg.WAVE_VARS}
     residual_by_var = {var: [] for var in cfg.WAVE_VARS}
 
-    stations = {}
-    for nc_path in sorted(cfg.BUOY_DIR.glob("*.nc")):
-        buoy_id = nc_path.stem.split('-.-')[0]
-        buoy_name = buoy_id.split('-')[0]
-        if buoy_name in cfg.BUOY_IGNORE_LIST:
-            print(f'ignoring {buoy_name}')
-            continue
-        #print(f'adding {buoy_name}')
-
-        buoy_grootheid = nc_path.stem.split('-.-')[1]
-        if buoy_id in list(stations.keys()):
-            stations[buoy_id].append(buoy_grootheid)
-        else:
-            stations[buoy_id] = [buoy_grootheid]
-
+    stations = list_stations()
     for station in list(stations.keys()):
         buoy_ds = load_station(station, stations[station])
         buoy_id = buoy_ds.attrs["station_id"]
@@ -416,29 +256,29 @@ def build_combined_dataset():
     )
 
     ds_combined = xr.merge([ds_grid, buoy_ds_combined])
-    ds_combined.to_zarr(str(cfg.GRID_BUOYS_ZARR), mode="w")
-    print(f"Saved combined dataset to {cfg.GRID_BUOYS_ZARR}")
+    ds_combined.to_zarr(str(ncfg.GRID_BUOYS_ZARR), mode="w")
+    print(f"Saved combined dataset to {ncfg.GRID_BUOYS_ZARR}")
     return ds_combined
 
- 
+
 # ---------------------------------------------------------------------------
 # 8. CONVERT TO ML-READY ARRAYS (last step, right before feeding a model)
 # ---------------------------------------------------------------------------
- 
+
 def to_arrays(ds):
     ds = add_direction_sin_cos(ds)
-    X = ds[cfg.WIND_VARS].to_array().transpose("time", "variable", "lat", "lon").values
-    y = ds[cfg.MODEL_OUTPUT_VARS].to_array().transpose("time", "variable", "lat", "lon").values
+    X = ds[ncfg.WIND_VARS].to_array().transpose("time", "variable", "lat", "lon").values
+    y = ds[ncfg.MODEL_OUTPUT_VARS].to_array().transpose("time", "variable", "lat", "lon").values
     return X, y
- 
- 
+
+
 if __name__ == "__main__":
     build_dataset()
     build_combined_dataset()
 
     # Example: build a 24-hour-ahead forecasting dataset
-    """ds_combined = build_dataset(lead_time_hours=cfg.LEAD_TIME_HOURS)
-    train_ds, val_ds, test_ds = chronological_split(ds_combined, cfg.TRAIN_END, cfg.VAL_END)
+    """ds_combined = build_dataset(lead_time_hours=ncfg.LEAD_TIME_HOURS)
+    train_ds, val_ds, test_ds = chronological_split(ds_combined, ncfg.TRAIN_END, ncfg.VAL_END)
     X_train, y_train = to_arrays(train_ds)
     print("X_train shape:", X_train.shape, "y_train shape:", y_train.shape)"""
- 
+

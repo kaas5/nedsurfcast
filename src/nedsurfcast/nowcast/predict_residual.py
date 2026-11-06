@@ -12,16 +12,19 @@ the corrected wave height, with the buoy observations at that time overlaid.
 
 Prerequisites (pip install):
     scikit-learn scipy pandas xarray zarr numpy matplotlib
+
+Run from anywhere with: python -m nedsurfcast.nowcast.predict_residual
 """
 
 import numpy as np
 import pandas as pd
 import xarray as xr
 
-import config as cfg
-from load_data import LAG_STEPS, TARGET, build_features, build_table, feature_columns, grid_variables, load
-from models import MODELS
-from plot import plot_prediction
+from nedsurfcast import config as cfg
+from nedsurfcast.nowcast.load_data import (LAG_STEPS, TARGET, build_features, build_table, feature_columns,
+                                           grid_variables, load)
+from nedsurfcast.nowcast.models import MODELS
+from nedsurfcast.nowcast.plot import plot_prediction
 
 TIMESTAMP = "2024-12-06 09:00"   # storm Darragh; snapped to the nearest grid time
 MODEL_NAME = "hist-gbr"
