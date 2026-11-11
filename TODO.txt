@@ -14,3 +14,28 @@ buoy data van andere stations downloaden
 buoy data kan veeeel compacter worden opgeslagen
 grotere trainingset downloaden (zowel parameters als tijdspan)
 
+
+
+GFS swell partition bias correction:
+
+Download buoy spectra of the year 2024 and wind data.
+Convert buoy spectra to wave partitions by splitting E(f) as proposed.
+Determine if wave is swell or wind wave (by using wind data).
+Average the measurements per time window. For GFS, this is 1 hour I believe.
+Buoy locations:
+Duplicate codes at the same location: 
+EPL/EPL3, MUNS/MUN1, SCHB/SCB2, A12/A122. Check per pair which one has the longest series, or combine them.
+Good open-sea and coastal stations:
+A12, K133, EPL, E131, MUNS, Schouwenbank;
+the HKZ, HKN and HKW wind farms;
+IJgeul, Maasmond, Schulpengat, Cadzand
+
+Take the duplicate sensors out of the list. 
+Change the daterange in the global config to be the date range of the available buoy wave spectra. 
+Change the config so it will download the GFS swell partitions.
+Download GFS archived forecasts with all swell partitions in the daterange of the config.
+
+Change preprocess so it builds a dataset that combines the GFS archived runs with swell partitions and the measured/prepocessed buoy swell partitions.
+Match the swell partitions of GFS with buoy swell partitions during preprocessing by using hungarian matching. 
+1 matched partition becomes 1 sample to prevent the swapping of order error. 
+Report the matched, unmatched GFS and unmatched buoy swell count.

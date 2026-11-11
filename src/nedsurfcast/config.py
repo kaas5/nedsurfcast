@@ -20,8 +20,10 @@ BUOY_DIR = RAW_DIR / "buoys"
 # North Sea bounding box (lon_min, lon_max, lat_min, lat_max)
 DOMAIN = dict(lon=slice(-4, 9), lat=slice(62, 51))  # note: lat often descending in ERA5
 
-START_DATE = dt.datetime(2024, 1, 1)
-END_DATE = dt.datetime(2025, 1, 1)
+# Period of the measured RWS wave spectra (the RWsOS API keeps about one year; values start 2025-10-31).
+# The nowcast data (ERA5, CMEMS, buoys in data/raw) was downloaded for 2024-01-01 .. 2025-01-01.
+START_DATE = dt.datetime(2025, 11, 1)
+END_DATE = dt.datetime(2026, 11, 11)
 DATE_RANGE = slice(START_DATE, END_DATE)
 
 DUTCH_COAST = dict(lat=(51.2, 53.9), lon=(2.5, 7.3))  # (min, max) box for gridded residual predictions

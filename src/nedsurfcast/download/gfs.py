@@ -6,11 +6,15 @@ Run from anywhere with: python -m nedsurfcast.download.gfs
 """
 
 import datetime as dt
+import threading
 import numpy as np
 import xarray as xr
 
 from nedsurfcast import config as cfg
 from nedsurfcast.forecast import config as fcfg
+
+# eccodes (used by cfgrib) is not thread-safe: parallel decoding crashes it. Downloads still run in parallel.
+_GRIB_LOCK = threading.Lock()
 
 
 def _gfswave_url(issue: dt.datetime, lead: int) -> str:
@@ -30,7 +34,10 @@ def _gfswave_byte_ranges(idx_text: str, fields: list[str]) -> list[tuple[int, in
     for i, parts in enumerate(lines):
         if f"{parts[3]}:{parts[4]}" in fields:
             end = offsets[i + 1] - 1 if i + 1 < len(offsets) else None
-            ranges.append((offsets[i], end))
+            if ranges and ranges[-1][1] is not None and ranges[-1][1] + 1 == offsets[i]:
+                ranges[-1] = (ranges[-1][0], end)     # adjacent message: extend the previous request
+            else:
+                ranges.append((offsets[i], end))
     return ranges
 
 
@@ -51,19 +58,41 @@ def _download_gfswave_lead(session, issue: dt.datetime, lead: int, tmp_dir) -> x
     grib_path = tmp_dir / f"{issue:%Y%m%d%H}_f{lead:03d}.grib2"
     grib_path.write_bytes(b"".join(chunks))
     try:
-        ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={"indexpath": ""}, decode_timedelta=True)
-        # GRIB longitudes run 0..360; the North Sea domain crosses 0
-        ds = ds.assign_coords(longitude=((ds.longitude + 180) % 360) - 180).sortby("longitude")
-        ds = ds.rename({"latitude": "lat", "longitude": "lon"}).sel(**cfg.DOMAIN).load()
+        with _GRIB_LOCK:
+            ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={"indexpath": ""}, decode_timedelta=True)
+            # GRIB longitudes run 0..360; the North Sea domain crosses 0. Rounding removes float noise
+            # (359.750016) that would otherwise drop the domain edge at 9.0 from the selection.
+            ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180).round(4),
+                                  latitude=ds.latitude.round(4)).sortby("longitude")
+            ds = ds.rename({"latitude": "lat", "longitude": "lon"}).sel(**cfg.DOMAIN).load()
     finally:
         grib_path.unlink()
-    return ds.drop_vars([v for v in ("surface",) if v in ds.coords])
+    # Swell partitions "n in sequence" arrive as a dimension orderedSequenceData (1., 2., 3.); with only one
+    # sequence requested it is a scalar coordinate instead, which carries no information
+    if "orderedSequenceData" in ds.dims:
+        ds = (ds.assign_coords(orderedSequenceData=ds.orderedSequenceData.values.astype(int))
+                .rename(orderedSequenceData="swell_partition"))
+    return ds.drop_vars([v for v in ("surface", "orderedSequenceData") if v in ds.coords])
+
+
+def _session():
+    """requests session that retries dropped connections and server errors (S3 closes connections now and then)."""
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    retry = Retry(total=6, connect=6, read=6, status=6, backoff_factor=2,
+                  status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"])
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    return session
 
 
 def download_gfswave_cycle(issue: dt.datetime, overwrite: bool = False):
-    """One forecast run (all fcfg.GFSWAVE_LEAD_HOURS) -> gfswave_YYYYMMDD_HHz.nc with dims (lead_hours, lat, lon)."""
-    import requests
+    """One forecast run (all fcfg.GFSWAVE_LEAD_HOURS) -> gfswave_YYYYMMDD_HHz.nc with dims (lead_hours, lat, lon).
 
+    The file is only written when every lead time is in, so an interrupted run leaves no partial file.
+    """
     filename = fcfg.GFSWAVE_DIR / f"gfswave_{issue:%Y%m%d}_{issue:%H}z.nc"
     if filename.exists() and not overwrite:
         print(f"{filename.name}: already exists and overwrite=False, skipping")
@@ -72,7 +101,7 @@ def download_gfswave_cycle(issue: dt.datetime, overwrite: bool = False):
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     steps = []
-    with requests.Session() as session:
+    with _session() as session:
         for lead in fcfg.GFSWAVE_LEAD_HOURS:
             ds = _download_gfswave_lead(session, issue, lead, tmp_dir)
             if ds is None:
@@ -102,9 +131,18 @@ def download_gfswave(overwrite: bool = False, max_workers: int = 4):
         issues += [day.replace(hour=h) for h in fcfg.GFSWAVE_CYCLES]
         day += dt.timedelta(days=1)
 
-    # downloading is I/O bound, so threads are enough; list() re-raises errors from the workers
+    def safe_download(issue):
+        try:
+            download_gfswave_cycle(issue, overwrite)
+        except Exception as err:   # one failing run should not stop the others; rerun to fill the gaps
+            print(f"{issue:%Y-%m-%d %H}z: FAILED ({type(err).__name__}: {err})")
+            return issue
+
+    # downloading is I/O bound, so threads are enough
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        list(executor.map(lambda issue: download_gfswave_cycle(issue, overwrite), issues))
+        failed = [issue for issue in executor.map(safe_download, issues) if issue is not None]
+    if failed:
+        print(f"{len(failed)} runs failed, run again to retry them: {[f'{i:%Y-%m-%d %H}z' for i in failed]}")
 
 
 if __name__ == '__main__':

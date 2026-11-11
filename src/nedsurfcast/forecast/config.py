@@ -18,10 +18,54 @@ GFSWAVE_FIELDS = [
     "HTSGW:surface",             # significant wave height (m)
     "PERPW:surface",             # peak period (s)
     "DIRPW:surface",             # peak direction (deg)
-    "UGRD:surface",              # 10 m wind forcing (m/s)
+    "UGRD:surface",              # 10 m wind forcing (m/s); WIND/WDIR in the file are the same wind as speed/direction
     "VGRD:surface",
-    "SWELL:1 in sequence",       # primary swell partition: height, period, direction
-    "SWPER:1 in sequence",
-    "SWDIR:1 in sequence",
+    "WVHGT:surface",             # wind sea partition: height, period, direction
+    "WVPER:surface",
+    "WVDIR:surface",
+    # swell partitions, "1 in sequence" is the most energetic; the order swaps between time steps
+    *[f"{var}:{n} in sequence" for n in (1, 2, 3) for var in ("SWELL", "SWPER", "SWDIR")],
 ]
 GFSWAVE_DIR = cfg.RAW_DIR / "gfswave"
+
+# cfgrib variable name -> NCEP name used in GFSWAVE_FIELDS; the preprocessed dataset uses the NCEP names
+GFSWAVE_VAR_NAMES = {
+    "swh": "HTSGW", "perpw": "PERPW", "dirpw": "DIRPW", "u": "UGRD", "v": "VGRD",
+    "shts": "SWELL", "mpts": "SWPER", "swdir": "SWDIR",
+    "shww": "WVHGT", "mpww": "WVPER", "wvdir": "WVDIR",
+}
+
+""" Measured RWS wave spectra from the RWsOS viewer API (https://rwsos.rws.nl/viewer/) """
+# The API only keeps about one year of spectra: older events exist but carry null values
+# (checked 2026-11: values start 2025-10-31 for every station). Download regularly to build an archive.
+RWS_SPECTRA_URL = "https://rwsos.rws.nl/wb-api/dd/2.0"
+RWS_SPECTRA_SOURCE = "S_1"                    # "meting" (measurement)
+RWS_SPECTRA_SERIES = {                        # API observationTypeId -> variable name, 51 frequency bins each
+    "GD.28-78": "energy_density",             # cm2 s (converted to m2/Hz on download)
+    "GR.1-51": "direction",                   # mean direction per frequency (deg, coming from)
+    "GR.52-102": "spread",                    # directional spread per frequency (deg)
+}
+RWS_SPECTRA_NBINS = 51                        # bin i covers [10 i, 10 i + 10) mHz
+RWS_SPECTRA_DF = 0.01                         # Hz
+RWS_SPECTRA_STATIONS = [                      # open sea and open coast; estuaries/sheltered buoys left out
+    "K133",                                   # K13 Alpha (53.22N 3.22E), also a GFS-Wave station
+    # EPL/EPL3, A12/A122 and MUNS/MUN1 publish identical spectra where both exist (copies, not separate
+    # sensors): use one code per pair. SCHB/SCB2 are two different buoys at the same position.
+    "EPL3",                                   # Euro platform (51.99N 3.28E), also a GFS-Wave station
+    "A122",                                   # A12 platform (55.42N 3.82E); hardly any data after 2026-02
+    "E131",                                   # Maasgeul E13 buoy
+    "MUN1",                                   # Noordzee munitiestortplaats
+    "SCHB", "SCB2",                           # Schouwenbank directional waveriders
+    "HKZWN", "HKZWZ",                         # Hollandse Kust Zuid wind farm
+    "HKNWN", "HKNWZ",                         # Hollandse Kust Noord wind farm
+    "HKWWN", "HKWWZ",                         # Hollandse Kust West wind farm
+    "IJG1",                                   # IJgeul IJ11 buoy
+    "MMND",                                   # Maasmond
+    "SGAT",                                   # Schulpengat
+]
+RWS_SPECTRA_DIR = cfg.RAW_DIR / "rws_spectra"
+
+""" Residual dataset: buoy observation - GFS forecast at the buoy's matched grid cell """
+TARGET_GFS_VAR = "HTSGW"         # GFS significant wave height ...
+TARGET_BUOY_VAR = "VHM0"         # ... corrected towards RWS Hm0 (stored as VHM0, in m)
+RESIDUAL_ZARR = FORECAST_DIR / "gfswave_residuals.zarr"

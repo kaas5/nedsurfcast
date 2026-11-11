@@ -170,11 +170,12 @@ def resample_buoy_to_grid_time(buoy_ds: xr.Dataset, target_time: np.ndarray) -> 
         coords={"time": target_time},
     )
 
-def match_to_sea_cell(ds_grid: xr.Dataset, buoy_lat: float, buoy_lon: float):
+def match_to_sea_cell(ds_grid: xr.Dataset, buoy_lat: float, buoy_lon: float, var: str = "VHM0"):
     """Nearest valid (non-land) grid cell — reuses the sea-mask-aware
     matching approach from earlier, since the naive nearest-cell lookup
     can land on a masked land cell near the coast."""
-    sea_mask = ds_grid["VHM0"].isel(time=0).notnull().values
+    da = ds_grid[var]
+    sea_mask = da.isel({d: 0 for d in da.dims if d not in ("lat", "lon")}).transpose("lat", "lon").notnull().values
     lat2d, lon2d = np.meshgrid(ds_grid.lat.values, ds_grid.lon.values, indexing="ij")
     sea_points = np.column_stack([lat2d[sea_mask], lon2d[sea_mask]])
 
