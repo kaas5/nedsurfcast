@@ -39,3 +39,43 @@ Change preprocess so it builds a dataset that combines the GFS archived runs wit
 Match the swell partitions of GFS with buoy swell partitions during preprocessing by using hungarian matching. 
 1 matched partition becomes 1 sample to prevent the swapping of order error. 
 Report the matched, unmatched GFS and unmatched buoy swell count.
+
+Remarks about the approach:
+
+1. Bias due to coarse grid. The size of the grid cells is large. If a measuring station is at the edge of the matched cell, it could introduce bias because the measuring site is in a different location than the GFS prediction. One solution I can think of is to approximate the values at the station's location by linear interpolation of the 4 grid cells surrounding the station. Is this a viable approach?
+Regarding point 1, I want to eventually use the model learned on the measured data to bias correct grid cells that do NOT contain a station, i.e. a general model. How do I encode the distance of the station in regards to the center of the matched cell to let the model learn the bias that an off-center measuring station introduces?
+
+Use the model without bathymetry, distance to coast, etc. as a baseline. This can be added later to improve the predictions. Introduce these variables as a function of the incoming swell instead of directly giving them to the model. It could introduce an "ID" which could make the model not generalise.
+
+Coarse grid gradient is only a small error compared to the gfs-buoy error. Ignore it for now.
+
+
+2. Wave systems unknown to GFS but detected by the buoys are unaccounted for. My idea is to have 3 swell partitions for every predicted GFS sample. If GFS predicts less than 3 swell partitions I fill it up with partitions with a height/energy of 0. If the measured samples do contain more swell partitions than the amount predicted by GFS they can still be matched with. Would this work?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -65,7 +65,21 @@ RWS_SPECTRA_STATIONS = [                      # open sea and open coast; estuari
 ]
 RWS_SPECTRA_DIR = cfg.RAW_DIR / "rws_spectra"
 
-""" Residual dataset: buoy observation - GFS forecast at the buoy's matched grid cell """
-TARGET_GFS_VAR = "HTSGW"         # GFS significant wave height ...
-TARGET_BUOY_VAR = "VHM0"         # ... corrected towards RWS Hm0 (stored as VHM0, in m)
-RESIDUAL_ZARR = FORECAST_DIR / "gfswave_residuals.zarr"
+# Buoy spectrum partitioning (common/partition.py), tuned with forecast/check_partitions.py
+BUOY_SPECTRA_WINDOW = "60min"                 # spectra averaged over [t - window, t + window] before partitioning
+BUOY_PARTITION_KWARGS = dict(                 # passed to partition_spectrum
+    f_range=(0.03, 0.5),                      # Hz; below 0.03 the buoy data is unreliable
+    trough_ratio=0.6,
+    min_df=0.02,
+    max_dir_diff=60.0,
+    min_hs=0.1,
+)
+
+""" Partition dataset: GFS wave systems matched to buoy wave systems (forecast/preprocess.py) """
+MERGE_GFS = True                              # merge GFS partitions a 1D buoy cannot resolve (common.partition.merge_unresolvable)
+MATCH_KWARGS = dict(                          # common.partition.match_partitions; use the same for training and evaluation
+    max_dist=2.0,                             # normalised distance gate
+    sigma_f=0.02,                             # Hz per unit distance
+    sigma_dir=30.0,                           # degrees per unit distance
+)
+PARTITION_ZARR = FORECAST_DIR / "gfswave_partitions.zarr"

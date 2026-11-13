@@ -271,3 +271,101 @@ def match_partitions(a, b, max_dist=2.0, sigma_f=0.02, sigma_dir=30.0):
     pairs = [(int(ia[r]), int(ib[c])) for r, c in zip(rows, cols) if cost[r, c] <= max_dist]
     matched_a, matched_b = {i for i, _ in pairs}, {j for _, j in pairs}
     return pairs, [int(i) for i in ia if i not in matched_a], [int(j) for j in ib if j not in matched_b]
+
+
+# ---------------------------------------------------------------------------
+# 5. INTERPOLATE PARTITIONS BETWEEN GRID CELLS
+# ---------------------------------------------------------------------------
+
+def interpolate_partitions(cells, weights, max_dist=2.0, sigma_f=0.02, sigma_dir=30.0):
+    """Partitions at a point between grid cells, interpolated per wave system.
+
+    cells: list of arrays (n, >=3) with (hs, fp, dir) per surrounding sea cell; NaN or zero hs = absent.
+    weights: bilinear weights of those cells (land cells removed, renormalised to sum 1).
+
+    Slots cannot be interpolated directly (swell 1 in one cell can be swell 2 in the next), so the
+    partitions are first matched between the cells into wave systems, starting from the cell with the
+    largest weight. Per system the energy is interpolated with zero energy where the system is absent
+    (Hs = 4 sqrt(sum w E)); peak frequency and direction are energy-weighted over the cells where it exists.
+    -> array (n_systems, 3) with (hs, fp, dir), largest first.
+    """
+    weights = np.asarray(weights, float)
+    systems = []                                              # per system: {cell index: (hs, fp, dir)}
+    for c in np.argsort(weights)[::-1]:
+        cell = np.atleast_2d(np.asarray(cells[c], float))[:, :3]
+        current = np.array([_combine_system(s, weights)[0] for s in systems]) if systems else np.empty((0, 3))
+        pairs, _, unmatched = match_partitions(current, cell, max_dist, sigma_f, sigma_dir)
+        for i, j in pairs:
+            systems[i][c] = cell[j]
+        for j in unmatched:
+            systems.append({c: cell[j]})
+    if not systems:
+        return np.empty((0, 3))
+    out = np.array([_combine_system(s, weights)[1] for s in systems])
+    return out[np.argsort(-out[:, 0])]
+
+
+def _combine_system(system, weights):
+    """-> (estimate over the cells where the system exists, used for matching),
+          (value at the point: cells without the system count as zero energy)."""
+    idx = np.array(list(system))
+    hs, fp, direction = np.array(list(system.values())).T
+    e = hs ** 2 / 16
+    w = weights[idx]
+    we = w * e
+    fp_mean = float(np.sum(we * fp) / we.sum())
+    dir_mean = _weighted_direction(we, direction)
+    hs_present = 4 * np.sqrt(we.sum() / w.sum())
+    hs_point = 4 * np.sqrt(we.sum())
+    return (hs_present, fp_mean, dir_mean), (hs_point, fp_mean, dir_mean)
+
+
+# ---------------------------------------------------------------------------
+# 6. MERGE MODEL PARTITIONS THE BUOY CANNOT RESOLVE
+# ---------------------------------------------------------------------------
+
+_F_NORM = np.linspace(0.005, 2.0, 4000)   # wide grid to normalise the JONSWAP shape to the full Hs
+
+
+def jonswap(f, hs, fp, gamma=3.3):
+    """JONSWAP frequency spectrum (m2/Hz) with significant wave height hs over all frequencies."""
+    def shape(x):
+        sigma = np.where(x <= fp, 0.07, 0.09)
+        return x ** -5.0 * np.exp(-1.25 * (fp / x) ** 4) * gamma ** np.exp(-((x - fp) ** 2) / (2 * sigma ** 2 * fp ** 2))
+    return shape(np.asarray(f, float)) * (hs ** 2 / 16) / np.trapz(shape(_F_NORM), _F_NORM)
+
+
+def synthesize_spectrum(parts, f, gamma=3.3):
+    """Partitions (n, >=3) with (hs, fp, dir) -> 1D spectrum E(f) and mean direction per frequency.
+
+    Each partition gets a JONSWAP shape; the direction per frequency is the energy-weighted vector mean
+    of the partitions, like the mean direction a directional buoy reports per frequency.
+    """
+    parts = np.atleast_2d(np.asarray(parts, float))
+    parts = parts[np.isfinite(parts[:, 0]) & (parts[:, 0] > 0) & np.isfinite(parts[:, 1])]
+    e_k = np.array([jonswap(f, hs, fp, gamma) for hs, fp, _ in parts[:, :3]]).reshape(len(parts), len(f))
+    rad = np.deg2rad(parts[:, 2])[:, None]
+    e = e_k.sum(0)
+    theta = np.rad2deg(np.arctan2((e_k * np.sin(rad)).sum(0), (e_k * np.cos(rad)).sum(0))) % 360
+    return e, np.where(e > 0, theta, np.nan)
+
+
+def merge_unresolvable(parts, f, gamma=3.3, **partition_kwargs) -> np.ndarray:
+    """Model partitions (e.g. GFS) as a 1D directional buoy would see them.
+
+    The model partitions a 2D spectrum and can separate systems at overlapping frequencies with a
+    moderate direction difference; the buoy partitioning (1D E(f) + one mean direction per frequency)
+    cannot. Rebuilding a 1D spectrum from the partitions on the buoy frequency grid f and partitioning
+    it with partition_spectrum (same settings as for the buoy) gives the model the buoy's resolution:
+    unresolvable systems merge, resolvable ones stay separate, and the energy is kept.
+
+    Assumes a JONSWAP shape per partition (gamma=3.3): real swell is often narrower, so this merges
+    slightly more than strictly necessary.
+    parts: (n, >=3) with (hs, fp, dir), NaN rows for absent partitions.
+    -> (m, 3) with (hs, fp, dir), largest first; Hs within f_range only, as for the buoy.
+    """
+    e, theta = synthesize_spectrum(parts, f, gamma)
+    if not np.any(e > 0):
+        return np.empty((0, 3))
+    merged = partition_spectrum(f, e, theta, **partition_kwargs)
+    return np.array([[p["hs"], p["fp"], p["dir"]] for p in merged]).reshape(-1, 3)

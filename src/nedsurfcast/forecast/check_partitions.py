@@ -25,14 +25,9 @@ from nedsurfcast.common.partition import average_spectra, load_spectra, partitio
 from nedsurfcast.forecast import config as fcfg
 
 STATION = "K133"
-AVERAGE_WINDOW = "60min"          # spectra averaged over [t - window, t + window] before partitioning
-PARTITION_KWARGS = dict(          # passed to partition_spectrum; change these while checking
-    trough_ratio=0.6,
-    min_df=0.02,
-    max_dir_diff=60.0,
-    min_hs=0.1,
-)
-F_RANGE = (0.03, 0.5)
+AVERAGE_WINDOW = fcfg.BUOY_SPECTRA_WINDOW
+PARTITION_KWARGS = fcfg.BUOY_PARTITION_KWARGS     # change these in forecast/config.py while checking
+F_RANGE = PARTITION_KWARGS["f_range"]
 SEED = 0
 COLORS = plt.get_cmap("tab10").colors
 
@@ -153,7 +148,7 @@ def summarize(spectra, parts):
 
 if __name__ == "__main__":
     spectra = average_spectra(load_spectra(fcfg.RWS_SPECTRA_DIR, STATION), window=AVERAGE_WINDOW)
-    parts = partition_dataset(spectra, f_range=F_RANGE, **PARTITION_KWARGS)
+    parts = partition_dataset(spectra, **PARTITION_KWARGS)
     summarize(spectra, parts)
     plot_examples(spectra, parts, pick_examples(parts))
     plot_period(spectra, parts)
