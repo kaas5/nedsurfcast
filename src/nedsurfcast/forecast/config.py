@@ -28,6 +28,10 @@ GFSWAVE_FIELDS = [
 ]
 GFSWAVE_DIR = cfg.RAW_DIR / "gfswave"
 
+# GFS-Wave point output: full 2D spectra at a few stations (gfs.YYYYMMDD/HH/wave/station/bulls.tHHz/gfswave.<ID>.spec)
+GFSWAVE_SPEC_STATIONS = {"K13": "K133", "EURO": "EPL3"}   # GFS station -> RWS spectrum station at the same spot
+GFSWAVE_SPEC_DIR = cfg.RAW_DIR / "gfswave_spectra"
+
 # cfgrib variable name -> NCEP name used in GFSWAVE_FIELDS; the preprocessed dataset uses the NCEP names
 GFSWAVE_VAR_NAMES = {
     "swh": "HTSGW", "perpw": "PERPW", "dirpw": "DIRPW", "u": "UGRD", "v": "VGRD",
@@ -83,3 +87,6 @@ MATCH_KWARGS = dict(                          # common.partition.match_partition
     sigma_dir=30.0,                           # degrees per unit distance
 )
 PARTITION_ZARR = FORECAST_DIR / "gfswave_partitions.zarr"
+
+""" Spectrum correction model (forecast/train_spectrum.py): out-of-sample predictions and scores """
+SPECTRUM_MODEL_DIR = FORECAST_DIR / "spectrum_model"

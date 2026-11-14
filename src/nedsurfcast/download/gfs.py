@@ -2,7 +2,9 @@
 Download archived NOAA GFS-Wave forecasts (forecast pipeline)
 ===============================================================
 
-Run from anywhere with: python -m nedsurfcast.download.gfs
+Run from anywhere with:
+    python -m nedsurfcast.download.gfs              gridded fields (fcfg.GFSWAVE_FIELDS)
+    python -m nedsurfcast.download.gfs --spectra    point spectra at fcfg.GFSWAVE_SPEC_STATIONS
 """
 
 import datetime as dt
@@ -15,6 +17,8 @@ from nedsurfcast.forecast import config as fcfg
 
 # eccodes (used by cfgrib) is not thread-safe: parallel decoding crashes it. Downloads still run in parallel.
 _GRIB_LOCK = threading.Lock()
+# netCDF/HDF5 is not thread-safe either: concurrent writes fail or crash the process
+_NETCDF_LOCK = threading.Lock()
 
 
 def _gfswave_url(issue: dt.datetime, lead: int) -> str:
@@ -116,24 +120,28 @@ def download_gfswave_cycle(issue: dt.datetime, overwrite: bool = False):
     ds = xr.concat(steps, dim="step")
     lead_hours = (ds.step.values / np.timedelta64(1, "h")).astype(int)
     ds = ds.drop_vars("step").assign_coords(step=lead_hours).rename(step="lead_hours")  # cfgrib's step attrs break reading back
-    ds.to_netcdf(filename)
+    with _NETCDF_LOCK:
+        ds.to_netcdf(filename)
     print(f"{filename.name}: {len(steps)} lead times written")
 
 
-def download_gfswave(overwrite: bool = False, max_workers: int = 4):
-    """All forecast runs from cfg.START_DATE to cfg.END_DATE at fcfg.GFSWAVE_CYCLES, a few runs in parallel."""
-    from concurrent.futures import ThreadPoolExecutor
-
-    fcfg.GFSWAVE_DIR.mkdir(parents=True, exist_ok=True)
+def _issue_times() -> list[dt.datetime]:
+    """Every forecast run from cfg.START_DATE to cfg.END_DATE at fcfg.GFSWAVE_CYCLES."""
     issues = []
     day = cfg.START_DATE
     while day < cfg.END_DATE:
         issues += [day.replace(hour=h) for h in fcfg.GFSWAVE_CYCLES]
         day += dt.timedelta(days=1)
+    return issues
+
+
+def _run_parallel(download_one, issues, max_workers: int):
+    """download_one(issue) for every run, a few in parallel; a failing run is reported, not fatal."""
+    from concurrent.futures import ThreadPoolExecutor
 
     def safe_download(issue):
         try:
-            download_gfswave_cycle(issue, overwrite)
+            download_one(issue)
         except Exception as err:   # one failing run should not stop the others; rerun to fill the gaps
             print(f"{issue:%Y-%m-%d %H}z: FAILED ({type(err).__name__}: {err})")
             return issue
@@ -145,5 +153,114 @@ def download_gfswave(overwrite: bool = False, max_workers: int = 4):
         print(f"{len(failed)} runs failed, run again to retry them: {[f'{i:%Y-%m-%d %H}z' for i in failed]}")
 
 
+def download_gfswave(overwrite: bool = False, max_workers: int = 4):
+    """All gridded forecast runs from cfg.START_DATE to cfg.END_DATE, a few runs in parallel."""
+    fcfg.GFSWAVE_DIR.mkdir(parents=True, exist_ok=True)
+    _run_parallel(lambda issue: download_gfswave_cycle(issue, overwrite), _issue_times(), max_workers)
+
+
+# ---------------------------------------------------------------------------
+# POINT SPECTRA (station output)
+# ---------------------------------------------------------------------------
+# gfswave.<ID>.spec is an ASCII WAVEWATCH III spectral file with a fixed layout:
+#   header   14 lines, 985 bytes: title line, 50 frequencies (Hz, log-spaced 0.035-0.964), 36 directions (rad)
+#   per hour 260 lines, 20137 bytes: "YYYYMMDD HHMMSS", station line (name, lat, lon, depth, wind speed and
+#            direction, current speed and direction), 1800 values E(f, theta), frequency fastest
+# Hours 0..384 follow each other, so lead L starts at byte 985 + L * 20137 and a range request
+# fetches only the lead times needed.
+# Units m2/Hz/rad; directions nautical "going to" (checked against the RWS buoys: + 180 deg = "coming from").
+_SPEC_HEADER_BYTES = 985
+_SPEC_STEP_BYTES = 20137
+_SPEC_STEP_LINES = 260
+_SPEC_NF, _SPEC_ND = 50, 36
+
+
+def _gfswave_spec_url(issue: dt.datetime, station: str) -> str:
+    return (f"{fcfg.GFSWAVE_URL}/gfs.{issue:%Y%m%d}/{issue:%H}/wave/station/bulls.t{issue:%H}z/"
+            f"gfswave.{station}.spec")
+
+
+def parse_gfswave_spec(text: str):
+    """ASCII spectrum file (or its first hours) -> frequencies (Hz), directions (deg, going to),
+    valid times, energy (time, direction, frequency) in m2/Hz/rad, station lines."""
+    lines = text.splitlines()
+    header = " ".join(lines[1:14]).split()
+    freq = np.array(header[:_SPEC_NF], float)
+    direction = np.rad2deg(np.array(header[_SPEC_NF:_SPEC_NF + _SPEC_ND], float)) % 360
+    times, energy, station_lines = [], [], []
+    for i in range(14, len(lines) - _SPEC_STEP_LINES + 1, _SPEC_STEP_LINES):
+        times.append(dt.datetime.strptime(lines[i].strip(), "%Y%m%d %H%M%S"))
+        station_lines.append(lines[i + 1])
+        values = np.array(" ".join(lines[i + 2:i + _SPEC_STEP_LINES]).split(), float)
+        energy.append(values.reshape(_SPEC_ND, _SPEC_NF))
+    return freq, direction, times, np.array(energy), station_lines
+
+
+def download_gfswave_spectra_cycle(issue: dt.datetime, overwrite: bool = False):
+    """Point spectra of one run at fcfg.GFSWAVE_SPEC_STATIONS, lead times fcfg.GFSWAVE_LEAD_HOURS
+    -> gfswave_spec_YYYYMMDD_HHz.nc with energy (station, lead_hours, direction, frequency)."""
+    filename = fcfg.GFSWAVE_SPEC_DIR / f"gfswave_spec_{issue:%Y%m%d}_{issue:%H}z.nc"
+    if filename.exists() and not overwrite:
+        print(f"{filename.name}: already exists and overwrite=False, skipping")
+        return
+    max_lead = max(fcfg.GFSWAVE_LEAD_HOURS)
+    last_byte = _SPEC_HEADER_BYTES + (max_lead + 1) * _SPEC_STEP_BYTES - 1
+
+    stations, spectra, lats, lons, depths = [], [], [], [], []
+    freq = direction = None
+    with _session() as session:
+        for station in fcfg.GFSWAVE_SPEC_STATIONS:
+            r = session.get(_gfswave_spec_url(issue, station), headers={"Range": f"bytes=0-{last_byte}"}, timeout=120)
+            if r.status_code == 404:
+                print(f"{issue:%Y-%m-%d %H}z {station}: not in archive")
+                continue
+            r.raise_for_status()
+            freq, direction, times, energy, station_lines = parse_gfswave_spec(r.text)
+            if not times or times[0] != issue:
+                raise ValueError(f"{station}: first time {times[:1]} is not the issue time {issue}")
+            leads = [int((t - issue).total_seconds() // 3600) for t in times]
+            out = np.full((len(fcfg.GFSWAVE_LEAD_HOURS), _SPEC_ND, _SPEC_NF), np.nan, dtype=np.float32)
+            for k, h in enumerate(fcfg.GFSWAVE_LEAD_HOURS):
+                if h in leads:
+                    out[k] = energy[leads.index(h)]
+            spectra.append(out)
+            name_end = station_lines[0].index("'", 1) + 1        # values after the quoted name are fixed width
+            rest = station_lines[0][name_end:]
+            lats.append(float(rest[0:7])); lons.append(float(rest[7:14])); depths.append(float(rest[14:24]))
+            stations.append(station)
+    if not stations:
+        print(f"{issue:%Y-%m-%d %H}z: no station spectra, skipping")
+        return
+
+    ds = xr.Dataset(
+        {"energy": (("station", "lead_hours", "direction", "frequency"), np.stack(spectra),
+                    {"units": "m2/Hz/rad", "long_name": "WAVEWATCH III variance density E(f, theta)"}),
+         "lat": ("station", np.array(lats)), "lon": ("station", np.array(lons)),
+         "depth": ("station", np.array(depths), {"units": "m"})},
+        coords={"station": stations, "lead_hours": np.array(fcfg.GFSWAVE_LEAD_HOURS),
+                "direction": ("direction", direction, {"units": "degree", "long_name": "nautical, going to"}),
+                "frequency": ("frequency", freq, {"units": "Hz"}),
+                "time": np.datetime64(issue, "ns")},
+        attrs={"source": _gfswave_spec_url(issue, "<station>")},
+    )
+    with _NETCDF_LOCK:
+        ds.to_netcdf(filename)
+    print(f"{filename.name}: {len(stations)} stations written")
+
+
+def download_gfswave_spectra(overwrite: bool = False, max_workers: int = 4):
+    """Point spectra of every run from cfg.START_DATE to cfg.END_DATE at fcfg.GFSWAVE_SPEC_STATIONS."""
+    fcfg.GFSWAVE_SPEC_DIR.mkdir(parents=True, exist_ok=True)
+    _run_parallel(lambda issue: download_gfswave_spectra_cycle(issue, overwrite), _issue_times(), max_workers)
+
+
 if __name__ == '__main__':
-    download_gfswave()
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Download archived GFS-Wave forecasts")
+    ap.add_argument("--spectra", action="store_true", help="download the point spectra instead of the gridded fields")
+    args = ap.parse_args()
+    if args.spectra:
+        download_gfswave_spectra()
+    else:
+        download_gfswave()

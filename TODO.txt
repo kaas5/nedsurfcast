@@ -35,10 +35,15 @@ Change the daterange in the global config to be the date range of the available 
 Change the config so it will download the GFS swell partitions.
 Download GFS archived forecasts with all swell partitions in the daterange of the config.
 
-Change preprocess so it builds a dataset that combines the GFS archived runs with swell partitions and the measured/prepocessed buoy swell partitions.
-Match the swell partitions of GFS with buoy swell partitions during preprocessing by using hungarian matching. 
+This is the plan for building a zarr dataset that contains the residual between swell partitions for all cells that have a matched buoy. Do not execute it yet, analyze it first and give feedback on the plan:
+
+Change preprocess so it builds a zarr dataset that combines the GFS archived forecasts with swell partitions and the buoy swell partitions derived from the wave spectra.
+Preprocess the GFS partitions with merge = True.
+Match the swell partitions of GFS with buoy swell partitions by using the hungarian matching method. 
 1 matched partition becomes 1 sample to prevent the swapping of order error. 
 Report the matched, unmatched GFS and unmatched buoy swell count.
+
+
 
 Remarks about the approach:
 
@@ -48,7 +53,6 @@ Regarding point 1, I want to eventually use the model learned on the measured da
 Use the model without bathymetry, distance to coast, etc. as a baseline. This can be added later to improve the predictions. Introduce these variables as a function of the incoming swell instead of directly giving them to the model. It could introduce an "ID" which could make the model not generalise.
 
 Coarse grid gradient is only a small error compared to the gfs-buoy error. Ignore it for now.
-
 
 2. Wave systems unknown to GFS but detected by the buoys are unaccounted for. My idea is to have 3 swell partitions for every predicted GFS sample. If GFS predicts less than 3 swell partitions I fill it up with partitions with a height/energy of 0. If the measured samples do contain more swell partitions than the amount predicted by GFS they can still be matched with. Would this work?
 
@@ -60,14 +64,18 @@ Coarse grid gradient is only a small error compared to the gfs-buoy error. Ignor
 
 
 
+The GFS forecast is not the truth, the swell systems derived from GFS is just one of many ways of obtaining swell systems. The model optimises the predicted wave spectrum, so lets compare whats actually optimised for. 
+Validate the model by comparing:
+1. The measured wave spectra to the GFS forecast spectra.
+2. The measured wave spectra to the corrected spectra by the model.
+If 2 beats 1, the model beats the GFS forecast. The downside is that there are only 2 stations that have archived GFS spectral forecast data?
 
 
 
+Train an MLP and compare it to the spectra of the 2 stations that are predicted by GFS. Only perform the leave-one-group training on the folds that hold-out K113 and EPL3. Do not save the predicted spectra (and the label spectra etc.) to the zarr file, i am only interested in the table results for now.
 
 
-
-
-
+Change jonswap to the raw swell values. The model should learn how they interact with the final wave spectrum?
 
 
 

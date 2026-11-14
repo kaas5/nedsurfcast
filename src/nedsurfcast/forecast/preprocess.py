@@ -21,6 +21,9 @@ Zarr groups (one store, fcfg.PARTITION_ZARR):
                                                  PERPW/DIRPW (nearest), buoy Hm0, whether a spectrum exists
     samples        (sample,)         one row per merged GFS system at a station
     misses         (miss,)           buoy systems that no GFS system matched
+    spectra        (time, lead_hours, station, freq)   averaged buoy spectrum (energy, direction, spread)
+                                     and the GFS spectrum rebuilt from its partitions (JONSWAP per partition,
+                                     common.partition.synthesize_spectrum) on the same frequency bins
 
 `time` is the issue time; valid_time = time + lead_hours. Samples and misses index the other
 groups with time_idx, lead_idx and station. Residuals are not stored: compute them in the model
@@ -40,7 +43,7 @@ from nedsurfcast import config as cfg
 from nedsurfcast.common.buoys import match_to_sea_cell
 from nedsurfcast.common.grouping import group_points
 from nedsurfcast.common.partition import (average_spectra, load_spectra, match_partitions, merge_unresolvable,
-                                          partition_dataset, partition_distance)
+                                          partition_dataset, partition_distance, synthesize_spectrum)
 from nedsurfcast.forecast import config as fcfg
 
 GRID_STEP = 0.25            # deg, GFS global.0p25
@@ -151,10 +154,18 @@ def _distance_km(lat1, lon1, lat2, lon2):
 # 3. MATCHED WAVE SYSTEMS
 # ---------------------------------------------------------------------------
 
-def buoy_partitions(spectra: xr.Dataset, valid_times: np.ndarray) -> xr.Dataset:
-    """Buoy wave systems at the GFS valid times -> (time, partition) + hs_total (Hm0 in the partition range)."""
+def buoy_partitions(spectra: xr.Dataset, valid_times: np.ndarray) -> tuple[xr.Dataset, xr.Dataset]:
+    """Averaged buoy spectra at the GFS valid times (time, freq) and their wave systems (time, partition)
+    + hs_total (Hm0 in the partition range)."""
     averaged = average_spectra(spectra, window=fcfg.BUOY_SPECTRA_WINDOW).reindex(time=valid_times)
-    return partition_dataset(averaged, max_partitions=6, **fcfg.BUOY_PARTITION_KWARGS)
+    return averaged, partition_dataset(averaged, max_partitions=6, **fcfg.BUOY_PARTITION_KWARGS)
+
+
+def spectrum_freqs() -> tuple[np.ndarray, np.ndarray]:
+    """Buoy frequency bin centres and the mask of the bins inside the partitioning range."""
+    f = np.arange(fcfg.RWS_SPECTRA_NBINS) * fcfg.RWS_SPECTRA_DF + fcfg.RWS_SPECTRA_DF / 2
+    lo, hi = fcfg.BUOY_PARTITION_KWARGS["f_range"]
+    return f, (f >= lo) & (f <= hi)
 
 
 def _other_systems(parts: np.ndarray, i: int) -> tuple[float, float, float]:
@@ -201,8 +212,16 @@ def build_partition_dataset() -> dict[str, xr.Dataset]:
     hs, tp, dr = pts["hs"].values, pts["tp"].values, pts["dir"].values
 
     # merged GFS systems per (run, lead, cell), computed once and shared by stations with the same cell
-    f_buoy = np.arange(fcfg.RWS_SPECTRA_NBINS) * fcfg.RWS_SPECTRA_DF + fcfg.RWS_SPECTRA_DF / 2
+    f_buoy, f_sel = spectrum_freqs()
+    f_spec = f_buoy[f_sel]
     cache = {}
+    gfs_spec_cache = {}
+
+    def cell_spectrum(it, il, c):
+        # rebuilt from the raw (unmerged) partitions: the energies add up, so merging is irrelevant here
+        if (it, il, c) not in gfs_spec_cache:
+            gfs_spec_cache[(it, il, c)] = synthesize_spectrum(gfs_parts(hs[it, il, c], tp[it, il, c], dr[it, il, c]), f_spec)
+        return gfs_spec_cache[(it, il, c)]
 
     def cell_systems(it, il, c):
         if (it, il, c) not in cache:
@@ -214,10 +233,16 @@ def build_partition_dataset() -> dict[str, xr.Dataset]:
 
     station_times = {v: np.full((n_time, n_lead, len(names)), np.nan)
                      for v in ("gfs_htsgw", "gfs_u10", "gfs_v10", "gfs_perpw", "gfs_dirpw", "buoy_hm0")}
+    spec_shape = (n_time, n_lead, len(names), len(f_spec))
+    spectra_out = {v: np.full(spec_shape, np.nan, dtype=np.float32)
+                   for v in ("buoy_energy", "buoy_direction", "buoy_spread", "gfs_energy", "gfs_direction")}
+    valid_pos = np.searchsorted(valid_times, valid)                      # (time, lead) -> index in valid_times
     samples, misses = [], []
     for k, st in enumerate(names):
         s = stations[st]
-        buoy = buoy_partitions(s["spectra"], valid_times)
+        averaged, buoy = buoy_partitions(s["spectra"], valid_times)
+        for v, src in (("buoy_energy", "energy_density"), ("buoy_direction", "direction"), ("buoy_spread", "spread")):
+            spectra_out[v][:, :, k, :] = averaged[src].values[:, f_sel][valid_pos]
         b_all = np.stack([buoy.hs.values, buoy.fp.values, buoy.dir.values, buoy.spread.values], -1)
         b_hm0 = buoy["hs_total"].values
         tpos = {t: i for i, t in enumerate(valid_times)}
@@ -237,6 +262,7 @@ def build_partition_dataset() -> dict[str, xr.Dataset]:
                 if not np.isfinite(b_hm0[iv]):
                     continue                                    # no spectrum at this valid time
                 station_times["buoy_hm0"][it, il, k] = b_hm0[iv]
+                spectra_out["gfs_energy"][it, il, k], spectra_out["gfs_direction"][it, il, k] = cell_spectrum(it, il, near)
                 g = cell_systems(it, il, near)
                 b = b_all[iv][np.isfinite(b_all[iv][:, 0])]
                 pairs, unmatched_g, unmatched_b = match_partitions(g, b, **fcfg.MATCH_KWARGS)
@@ -286,6 +312,15 @@ def build_partition_dataset() -> dict[str, xr.Dataset]:
                                                                      np.isfinite(station_times["buoy_hm0"]))},
         coords=coords_tl | {"station": names})
 
+    out["spectra"] = xr.Dataset(
+        {v: (("time", "lead_hours", "station", "freq"), a) for v, a in spectra_out.items()},
+        coords=coords_tl | {"station": names, "freq": f_spec})
+    out["spectra"]["freq"].attrs = {"units": "Hz", "long_name": "centre of the 10 mHz buoy frequency bin"}
+    for v in ("buoy_energy", "gfs_energy"):
+        out["spectra"][v].attrs = {"units": "m2/Hz"}
+    for v in ("buoy_direction", "gfs_direction", "buoy_spread"):
+        out["spectra"][v].attrs = {"units": "degree"}
+    out["spectra"]["gfs_energy"].attrs["long_name"] = "JONSWAP (gamma 3.3) per GFS partition, summed; only where a buoy spectrum exists"
     out["samples"] = _table_to_dataset(pd.DataFrame(samples), "sample", pts, valid)
     out["misses"] = _table_to_dataset(pd.DataFrame(misses), "miss", pts, valid)
     return out
@@ -361,7 +396,105 @@ def report(samples: xr.Dataset, misses: xr.Dataset, station_times: xr.Dataset):
     print("\nBy lead time:"); print(by_lead.loc[[l for l in (0, 24, 48, 72) if l in by_lead.index]].to_string())
 
 
+# ---------------------------------------------------------------------------
+# 5. GFS POINT SPECTRA IN THE BUOY FORMAT
+# ---------------------------------------------------------------------------
+
+def _rebin_cumulative(density: np.ndarray, edges_from: np.ndarray, edges_to: np.ndarray) -> np.ndarray:
+    """Re-bin densities (..., n_from) per Hz to other bins, preserving energy: the cumulative integral is
+    interpolated at the new edges (uniform density within an old bin) and differenced again."""
+    cum = np.concatenate([np.zeros(density.shape[:-1] + (1,)), np.cumsum(density * np.diff(edges_from), -1)], -1)
+    idx = np.clip(np.searchsorted(edges_from, edges_to) - 1, 0, len(edges_from) - 2)
+    w = np.clip((edges_to - edges_from[idx]) / (edges_from[idx + 1] - edges_from[idx]), 0, 1)
+    cum_to = cum[..., idx] * (1 - w) + cum[..., idx + 1] * w
+    return np.diff(cum_to, axis=-1) / np.diff(edges_to)
+
+
+def gfs_spectrum_to_buoy_bins(energy: np.ndarray, freq: np.ndarray, direction_to: np.ndarray):
+    """GFS point spectra E(f, theta) -> the buoy format.
+
+    energy (..., direction, frequency) in m2/Hz/rad on GFS's log-spaced frequencies, directions nautical
+    "going to" (degrees). Returns energy density (..., n_bins) in m2/Hz and the mean direction per bin
+    (degrees, "coming from") on the buoy's 10 mHz bins within the partition range. The mean direction is
+    the energy-weighted vector average, the same definition as the buoy's mean direction per frequency.
+    """
+    f_buoy, f_sel = spectrum_freqs()
+    centres = f_buoy[f_sel]
+    edges_to = np.r_[centres - fcfg.RWS_SPECTRA_DF / 2, centres[-1] + fcfg.RWS_SPECTRA_DF / 2]
+    ratio = freq[1] / freq[0]                                       # log-spaced: geometric bin edges
+    edges_from = np.r_[freq[0] / np.sqrt(ratio), np.sqrt(freq[1:] * freq[:-1]), freq[-1] * np.sqrt(ratio)]
+
+    dtheta = 2 * np.pi / len(direction_to)
+    rad_from = np.deg2rad((np.asarray(direction_to) + 180) % 360)[:, None]
+    missing = ~np.isfinite(energy).any(axis=(-2, -1))
+    e = np.nan_to_num(energy)
+    e_f = _rebin_cumulative(e.sum(-2) * dtheta, edges_from, edges_to)
+    e_sin = _rebin_cumulative((e * np.sin(rad_from)).sum(-2) * dtheta, edges_from, edges_to)
+    e_cos = _rebin_cumulative((e * np.cos(rad_from)).sum(-2) * dtheta, edges_from, edges_to)
+    direction = np.where(e_f > 0, np.rad2deg(np.arctan2(e_sin, e_cos)) % 360, np.nan)
+    e_f[missing] = np.nan
+    direction[missing] = np.nan
+    return e_f, direction
+
+
+def load_gfs_station_spectra(times: np.ndarray, leads: np.ndarray) -> xr.Dataset:
+    """Downloaded point spectra (download/gfs.py --spectra) in the buoy format
+    -> (time, lead_hours, station, freq), stations named after the RWS station at the same spot."""
+    f_buoy, f_sel = spectrum_freqs()
+    names = list(fcfg.GFSWAVE_SPEC_STATIONS.values())
+    shape = (len(times), len(leads), len(names), int(f_sel.sum()))
+    energy = np.full(shape, np.nan, dtype=np.float32)
+    direction = np.full(shape, np.nan, dtype=np.float32)
+    n_found = 0
+    for it, t in enumerate(pd.to_datetime(times)):
+        path = fcfg.GFSWAVE_SPEC_DIR / f"gfswave_spec_{t:%Y%m%d}_{t:%H}z.nc"
+        if not path.exists():
+            continue
+        with xr.open_dataset(path) as ds:
+            ds = ds.load()
+        n_found += 1
+        e, d = gfs_spectrum_to_buoy_bins(ds["energy"].values, ds["frequency"].values, ds["direction"].values)
+        for gfs_name, rws_name in fcfg.GFSWAVE_SPEC_STATIONS.items():
+            if gfs_name not in ds.station.values:
+                continue
+            k = names.index(rws_name)
+            s = list(ds.station.values).index(gfs_name)
+            il = [list(leads).index(h) for h in ds.lead_hours.values if h in leads]
+            src = [i for i, h in enumerate(ds.lead_hours.values) if h in leads]
+            energy[it, il, k] = e[s, src]
+            direction[it, il, k] = d[s, src]
+    print(f"GFS point spectra: {n_found} of {len(times)} runs found in {fcfg.GFSWAVE_SPEC_DIR}")
+    out = xr.Dataset(
+        {"gfs_spec_energy": (("time", "lead_hours", "station", "freq"), energy, {"units": "m2/Hz"}),
+         "gfs_spec_direction": (("time", "lead_hours", "station", "freq"), direction,
+                                {"units": "degree", "long_name": "mean direction per bin, coming from"})},
+        coords={"time": times, "lead_hours": leads, "station": names, "freq": f_buoy[f_sel]},
+        attrs={"description": "GFS-Wave point spectra (station output) re-binned to the buoy frequency bins",
+               "gfs_stations": json.dumps(fcfg.GFSWAVE_SPEC_STATIONS)})
+    return out
+
+
+def append_gfs_station_spectra():
+    """Add (or replace) the group gfs_station_spectra in fcfg.PARTITION_ZARR, on the runs and lead
+    times of the existing dataset, without rebuilding the other groups."""
+    st = load("station_times")
+    ds = load_gfs_station_spectra(st["time"].values, st["lead_hours"].values)
+    group_dir = fcfg.PARTITION_ZARR / "gfs_station_spectra"
+    if group_dir.exists():
+        shutil.rmtree(group_dir)
+    ds.to_zarr(str(fcfg.PARTITION_ZARR), group="gfs_station_spectra", mode="a")
+    print(f"  wrote group gfs_station_spectra: {dict(ds.sizes)}")
+
+
 if __name__ == "__main__":
-    groups = build_partition_dataset()
-    save(groups)
-    report(groups["samples"], groups["misses"], groups["station_times"])
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Build the forecast dataset")
+    ap.add_argument("--station-spectra", action="store_true",
+                    help="only (re)build the gfs_station_spectra group in the existing dataset")
+    args = ap.parse_args()
+    if not args.station_spectra:
+        groups = build_partition_dataset()
+        save(groups)
+        report(groups["samples"], groups["misses"], groups["station_times"])
+    append_gfs_station_spectra()
