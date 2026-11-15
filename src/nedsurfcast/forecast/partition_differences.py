@@ -105,7 +105,7 @@ def run():
     def cell_parts(it, il, c):
         if (it, il, c) not in cache:
             p = gfs_parts(hs[it, il, c], tp[it, il, c], dr[it, il, c])
-            cache[(it, il, c)] = merge_unresolvable(p, f_buoy, **fcfg.BUOY_PARTITION_KWARGS) if MERGE_GFS else p
+            cache[(it, il, c)] = merge_unresolvable(p, f_buoy, fcfg.GFS_SPECTRUM_SHAPE, **fcfg.BUOY_PARTITION_KWARGS) if MERGE_GFS else p
         return cache[(it, il, c)]
 
     hs, tp, dr, ht = (gfs[v].values for v in ("hs", "tp", "dir", "htsgw"))

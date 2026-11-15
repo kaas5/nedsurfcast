@@ -12,9 +12,15 @@ sit at an RWS spectrum buoy (fcfg.GFSWAVE_SPEC_STATIONS: K13 -> K133, EURO -> EP
 
 If 2 beats 1, the model beats the GFS forecast. The reconstructed GFS spectrum (the model input) is shown as well.
 
-Ridge and the MLP (same settings as train_spectrum.py) are trained leave-one-group-out, only for the folds
-that hold out K133 and EPL3 (all other station groups train), each in two variants: GFS input only, and
-GFS + the GFS error at issue time. Choose the models with MODEL_VARIANTS.
+Ridge and the MLP (same settings as train_spectrum.py) are trained on two folds that combine leave-one-group
+and blocked time: each fold leaves out the station group of K133 or EPL3 AND its test blocks of time (the
+year in TEST_BLOCKS ~monthly blocks, alternating between the two folds, with TEST_GAP_HOURS on both sides of
+each block unused). The test set is the held-out station inside its test blocks: a station and periods the
+model has never seen, together covering the whole year, while training still spans all seasons.
+Variants: GFS input only, and GFS + the
+change of the GFS spectrum over the previous hours. No buoy measurement as input: it does not exist at grid
+cells without a buoy, so such a model would not generalise. Choose the models with MODEL_VARIANTS or
+--models, e.g. --models "ridge (GFS)" "ridge (GFS + history per band)".
 
 Scores over lead times >= EVAL_MIN_LEAD and spectra where the GFS point spectrum exists:
     rmse sqrt(E)    RMSE of the amplitude per bin: the energy part of the training loss
@@ -33,7 +39,7 @@ import numpy as np
 import pandas as pd
 
 from nedsurfcast.common.angles import wrap_angle
-from nedsurfcast.common.validation import rmse
+from nedsurfcast.common.validation import TIME_GAP_HOURS, rmse
 from nedsurfcast.forecast import config as fcfg
 from nedsurfcast.forecast.preprocess import load
 from nedsurfcast.forecast.train_spectrum import (EVAL_MIN_LEAD, MODELS, PERIOD_BANDS, SCORE_LEADS, SWELL_F_MAX,
@@ -42,11 +48,19 @@ from nedsurfcast.forecast.train_spectrum import (EVAL_MIN_LEAD, MODELS, PERIOD_B
 
 BOOTSTRAP = 1000
 SEED = 0
+# Test blocks: the issue times split in TEST_BLOCKS equal parts (~monthly), alternating between the folds: the
+# K133 fold tests on blocks 0, 2, 4, ..., the EPL3 fold on 1, 3, 5, ... Together the test set covers the whole
+# year, and each fold still trains on every season. Training leaves out each test block and TEST_GAP_HOURS on
+# both sides: forecasts (up to 72 h) of runs next to a block share its valid times, plus TIME_GAP_HOURS
+# against autocorrelation.
+TEST_BLOCKS = 12
+TEST_GAP_HOURS = max(fcfg.GFSWAVE_LEAD_HOURS) + TIME_GAP_HOURS
 MODEL_VARIANTS = {                      # name -> (model factory, feature set)
     "ridge (GFS)": (MODELS["ridge"][0], "gfs"),
-    "ridge (GFS + issue obs)": (MODELS["ridge"][0], "gfs+obs"),
+    "ridge (GFS + history)": (MODELS["ridge"][0], "gfs+history"),
+    "ridge (GFS + history per band)": (MODELS["ridge"][0], "gfs+history-bands"),
     "mlp (GFS)": (_mlp, "gfs"),
-    "mlp (GFS + issue obs)": (_mlp, "gfs+obs"),
+    "mlp (GFS + history per band)": (_mlp, "gfs+history-bands"),
 }
 BASELINE = "GFS point spectrum"
 
@@ -79,23 +93,43 @@ def attach_point_spectra(data: dict) -> np.ndarray:
 # 2. MODELS ON THE FOLDS THAT HOLD OUT THE POINT-SPECTRUM STATIONS
 # ---------------------------------------------------------------------------
 
-def predict_held_out(data: dict) -> dict[str, np.ndarray]:
-    """Out-of-sample residuals of every model variant for the rows of K133 and EPL3 (their station group held out)."""
+def predict_held_out(data: dict, variants: dict = MODEL_VARIANTS) -> dict[str, np.ndarray]:
+    """Out-of-sample residuals of each model variant (name -> (factory, feature set)) for the rows of K133 and
+    EPL3, each trained with its station group held out."""
     m = data["meta"]
     Y = targets(data)
-    X = {fs: features(data, fs) for _, fs in MODEL_VARIANTS.values()}
-    pred = {name: np.full(Y.shape, np.nan) for name in MODEL_VARIANTS}
-    for station in fcfg.GFSWAVE_SPEC_STATIONS.values():
+    X = {fs: features(data, fs) for _, fs in variants.values()}
+    pred = {name: np.full(Y.shape, np.nan) for name in variants}
+    stations = list(fcfg.GFSWAVE_SPEC_STATIONS.values())
+    for k, station in enumerate(stations):
+        in_block, near_block, edges = test_block(m, k, len(stations))
+        print(f"  test blocks of {station}: {', '.join(f'{a:%Y-%m-%d}..{b:%m-%d}' for a, b in edges)}; "
+              f"training also leaves out {TEST_GAP_HOURS} h on both sides of each")
         group = m.loc[m["station"] == station, "buoy_group"].iloc[0]
-        is_train = (m["buoy_group"] != group).to_numpy()
-        is_test = (m["station"] == station).to_numpy()
+        is_train = (m["buoy_group"] != group).to_numpy() & ~near_block
+        is_test = (m["station"] == station).to_numpy() & in_block
         held_out = sorted(m.loc[m["buoy_group"] == group, "station"].unique())
-        for name, (make, fs) in MODEL_VARIANTS.items():
+        for name, (make, fs) in variants.items():
             model = make().fit(X[fs][is_train], Y[is_train])
             pred[name][is_test] = np.clip(model.predict(X[fs][is_test]), Y[is_train].min(0), Y[is_train].max(0))
-        print(f"  fold holding out {held_out}: trained on {int(is_train.sum())} spectra, "
+        print(f"  fold holding out {held_out} and the test block: trained on {int(is_train.sum())} spectra, "
               f"predicted {int(is_test.sum())} spectra of {station}")
     return pred
+
+
+def test_block(meta: pd.DataFrame, k: int, n_folds: int = 2) -> tuple[np.ndarray, np.ndarray, list]:
+    """Test blocks of fold k: the issue times split in TEST_BLOCKS equal parts, fold k takes every n_folds-th
+    block starting at k (alternating). Returns the rows in its blocks, the rows training must leave out (the
+    blocks plus TEST_GAP_HOURS on both sides of each) and the blocks' (start, end)."""
+    times = meta["time"].to_numpy()
+    gap = np.timedelta64(TEST_GAP_HOURS, "h")
+    in_block, near_block = np.zeros(len(times), bool), np.zeros(len(times), bool)
+    edges = []
+    for block in np.array_split(np.unique(times), TEST_BLOCKS)[k::n_folds]:
+        in_block |= (times >= block[0]) & (times <= block[-1])
+        near_block |= (times >= block[0] - gap) & (times <= block[-1] + gap)
+        edges.append((pd.Timestamp(block[0]), pd.Timestamp(block[-1])))
+    return in_block, near_block, edges
 
 
 # ---------------------------------------------------------------------------
@@ -193,16 +227,19 @@ def bootstrap_skill(sets: dict, data: dict, rows: np.ndarray, metrics=("rmse sqr
 # 4. RUN
 # ---------------------------------------------------------------------------
 
-def run():
+def run(models: list[str] | None = None):
+    """models: names from MODEL_VARIANTS to train (default all)."""
+    variants = {k: v for k, v in MODEL_VARIANTS.items() if models is None or k in models}
     data = load_data()
     has_point = attach_point_spectra(data)
     m = data["meta"]
-    print(f"{int(has_point.sum())} spectra of {sorted(fcfg.GFSWAVE_SPEC_STATIONS.values())} have a GFS point spectrum")
+    print(f"{int(has_point.sum())} spectra of {sorted(fcfg.GFSWAVE_SPEC_STATIONS.values())} have a GFS point spectrum; "
+          f"models: {list(variants)}")
 
-    pred = predict_held_out(data)
+    pred = predict_held_out(data, variants)
     rows = has_point & (m["lead_hours"].to_numpy() >= EVAL_MIN_LEAD)
     for p in pred.values():
-        rows &= np.isfinite(p).all(1) | ~rows        # only rows that were predicted (all of K133/EPL3)
+        rows &= np.isfinite(p).all(1) | ~rows        # only rows that were predicted (K133/EPL3 in the test block)
     print(f"Scoring {int(rows.sum())} spectra (lead times >= {EVAL_MIN_LEAD} h, "
           f"{m.loc[rows, 'time'].nunique()} forecast runs)\n")
 
@@ -243,4 +280,12 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Compare the corrected spectra with GFS's point spectra")
+    ap.add_argument("--models", nargs="+", metavar="NAME", help=f"subset of {list(MODEL_VARIANTS)}")
+    args = ap.parse_args()
+    unknown = set(args.models or []) - set(MODEL_VARIANTS)
+    if unknown:
+        ap.error(f"unknown models {sorted(unknown)}; choose from {list(MODEL_VARIANTS)}")
+    run(args.models)

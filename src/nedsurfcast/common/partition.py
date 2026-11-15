@@ -324,33 +324,66 @@ def _combine_system(system, weights):
 # 6. MERGE MODEL PARTITIONS THE BUOY CANNOT RESOLVE
 # ---------------------------------------------------------------------------
 
-_F_NORM = np.linspace(0.005, 2.0, 4000)   # wide grid to normalise the JONSWAP shape to the full Hs
+_U_NORM = np.geomspace(0.3, 50.0, 4000)   # f / fp grid to normalise the shape to the full Hs
 
 
-def jonswap(f, hs, fp, gamma=3.3):
-    """JONSWAP frequency spectrum (m2/Hz) with significant wave height hs over all frequencies."""
-    def shape(x):
-        sigma = np.where(x <= fp, 0.07, 0.09)
-        return x ** -5.0 * np.exp(-1.25 * (fp / x) ** 4) * gamma ** np.exp(-((x - fp) ** 2) / (2 * sigma ** 2 * fp ** 2))
-    return shape(np.asarray(f, float)) * (hs ** 2 / 16) / np.trapz(shape(_F_NORM), _F_NORM)
+def _shape(u, gamma, n):
+    """Generalised JONSWAP shape in u = f / fp: tail u^-n, peak enhancement gamma; the peak stays at u = 1."""
+    sigma = np.where(u <= 1, 0.07, 0.09)
+    return u ** -n * np.exp(-(n / 4) * u ** -4) * gamma ** np.exp(-((u - 1) ** 2) / (2 * sigma ** 2))
 
 
-def synthesize_spectrum(parts, f, gamma=3.3):
+def jonswap(f, hs, fp, gamma=3.3, n=5.0):
+    """JONSWAP frequency spectrum (m2/Hz) with significant wave height hs over all frequencies.
+
+    n is the exponent of the high-frequency tail (5 = classic JONSWAP); the low-frequency side uses
+    exp(-(n/4) (fp/f)^4) so that the peak stays at fp. hs, fp, gamma and n broadcast: with arrays of
+    shape (k,) the result is (k, len(f)).
+    """
+    hs, fp, gamma, n = np.broadcast_arrays(*(np.asarray(v, float) for v in (hs, fp, gamma, n)))
+    # the normalisation only depends on (gamma, n): computed once per unique pair
+    pairs, inverse = np.unique(np.column_stack([gamma.ravel(), n.ravel()]), axis=0, return_inverse=True)
+    norm_u = np.empty(len(pairs))
+    for i in range(0, len(pairs), 500):                  # in blocks: (k, len(_U_NORM)) gets large
+        sl = slice(i, i + 500)
+        norm_u[sl] = np.trapz(_shape(_U_NORM, pairs[sl, :1], pairs[sl, 1:]), _U_NORM, axis=-1)
+    norm = norm_u[inverse.ravel()].reshape(gamma.shape)
+    hs, fp, gamma, n, norm = (v[..., None] for v in (hs, fp, gamma, n, norm))
+    return (hs ** 2 / 16) * _shape(np.asarray(f, float) / fp, gamma, n) / (fp * norm)
+
+
+def shape_parameters(fp, shape: dict | None = None):
+    """Peak enhancement gamma and tail exponent n per partition from its peak period.
+
+    shape: dict(t_lo, t_hi, gamma=(lo, hi), tail=(lo, hi)); below t_lo seconds the lo values, above t_hi
+    the hi values, linear in between. None = classic JONSWAP (3.3, 5).
+    """
+    fp = np.asarray(fp, float)
+    if shape is None:
+        return np.full_like(fp, 3.3), np.full_like(fp, 5.0)
+    w = np.clip((1 / fp - shape["t_lo"]) / (shape["t_hi"] - shape["t_lo"]), 0, 1)
+    (g_lo, g_hi), (n_lo, n_hi) = shape["gamma"], shape["tail"]
+    return g_lo + w * (g_hi - g_lo), n_lo + w * (n_hi - n_lo)
+
+
+def synthesize_spectrum(parts, f, shape: dict | None = None):
     """Partitions (n, >=3) with (hs, fp, dir) -> 1D spectrum E(f) and mean direction per frequency.
 
-    Each partition gets a JONSWAP shape; the direction per frequency is the energy-weighted vector mean
-    of the partitions, like the mean direction a directional buoy reports per frequency.
+    Each partition gets a JONSWAP shape with gamma and tail exponent from its peak period
+    (shape_parameters); the direction per frequency is the energy-weighted vector mean of the
+    partitions, like the mean direction a directional buoy reports per frequency.
     """
     parts = np.atleast_2d(np.asarray(parts, float))
     parts = parts[np.isfinite(parts[:, 0]) & (parts[:, 0] > 0) & np.isfinite(parts[:, 1])]
-    e_k = np.array([jonswap(f, hs, fp, gamma) for hs, fp, _ in parts[:, :3]]).reshape(len(parts), len(f))
+    gamma, n = shape_parameters(parts[:, 1], shape)
+    e_k = jonswap(f, parts[:, 0], parts[:, 1], gamma, n).reshape(len(parts), len(f))
     rad = np.deg2rad(parts[:, 2])[:, None]
     e = e_k.sum(0)
     theta = np.rad2deg(np.arctan2((e_k * np.sin(rad)).sum(0), (e_k * np.cos(rad)).sum(0))) % 360
     return e, np.where(e > 0, theta, np.nan)
 
 
-def merge_unresolvable(parts, f, gamma=3.3, **partition_kwargs) -> np.ndarray:
+def merge_unresolvable(parts, f, shape: dict | None = None, **partition_kwargs) -> np.ndarray:
     """Model partitions (e.g. GFS) as a 1D directional buoy would see them.
 
     The model partitions a 2D spectrum and can separate systems at overlapping frequencies with a
@@ -359,12 +392,12 @@ def merge_unresolvable(parts, f, gamma=3.3, **partition_kwargs) -> np.ndarray:
     it with partition_spectrum (same settings as for the buoy) gives the model the buoy's resolution:
     unresolvable systems merge, resolvable ones stay separate, and the energy is kept.
 
-    Assumes a JONSWAP shape per partition (gamma=3.3): real swell is often narrower, so this merges
-    slightly more than strictly necessary.
+    Assumes a JONSWAP shape per partition (shape: see shape_parameters; None = gamma 3.3 for all,
+    which is too broad for swell and merges more than necessary).
     parts: (n, >=3) with (hs, fp, dir), NaN rows for absent partitions.
     -> (m, 3) with (hs, fp, dir), largest first; Hs within f_range only, as for the buoy.
     """
-    e, theta = synthesize_spectrum(parts, f, gamma)
+    e, theta = synthesize_spectrum(parts, f, shape)
     if not np.any(e > 0):
         return np.empty((0, 3))
     merged = partition_spectrum(f, e, theta, **partition_kwargs)

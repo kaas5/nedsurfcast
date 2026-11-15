@@ -5,6 +5,7 @@ Download archived NOAA GFS-Wave forecasts (forecast pipeline)
 Run from anywhere with:
     python -m nedsurfcast.download.gfs              gridded fields (fcfg.GFSWAVE_FIELDS)
     python -m nedsurfcast.download.gfs --spectra    point spectra at fcfg.GFSWAVE_SPEC_STATIONS
+    python -m nedsurfcast.download.gfs --nowcast    analyses (f000/f003) of the 06/12/18z runs
 """
 
 import datetime as dt
@@ -92,21 +93,24 @@ def _session():
     return session
 
 
-def download_gfswave_cycle(issue: dt.datetime, overwrite: bool = False):
-    """One forecast run (all fcfg.GFSWAVE_LEAD_HOURS) -> gfswave_YYYYMMDD_HHz.nc with dims (lead_hours, lat, lon).
+def download_gfswave_cycle(issue: dt.datetime, overwrite: bool = False, leads=None, out_dir=None):
+    """One forecast run (fcfg.GFSWAVE_LEAD_HOURS, or `leads`) -> <out_dir>/gfswave_YYYYMMDD_HHz.nc with dims
+    (lead_hours, lat, lon); out_dir defaults to fcfg.GFSWAVE_DIR.
 
     The file is only written when every lead time is in, so an interrupted run leaves no partial file.
     """
-    filename = fcfg.GFSWAVE_DIR / f"gfswave_{issue:%Y%m%d}_{issue:%H}z.nc"
+    leads = fcfg.GFSWAVE_LEAD_HOURS if leads is None else leads
+    out_dir = fcfg.GFSWAVE_DIR if out_dir is None else out_dir
+    filename = out_dir / f"gfswave_{issue:%Y%m%d}_{issue:%H}z.nc"
     if filename.exists() and not overwrite:
         print(f"{filename.name}: already exists and overwrite=False, skipping")
         return
-    tmp_dir = fcfg.GFSWAVE_DIR / "tmp"
+    tmp_dir = out_dir / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     steps = []
     with _session() as session:
-        for lead in fcfg.GFSWAVE_LEAD_HOURS:
+        for lead in leads:
             ds = _download_gfswave_lead(session, issue, lead, tmp_dir)
             if ds is None:
                 print(f"{issue:%Y-%m-%d %H}z f{lead:03d}: not in archive")
@@ -125,12 +129,13 @@ def download_gfswave_cycle(issue: dt.datetime, overwrite: bool = False):
     print(f"{filename.name}: {len(steps)} lead times written")
 
 
-def _issue_times() -> list[dt.datetime]:
-    """Every forecast run from cfg.START_DATE to cfg.END_DATE at fcfg.GFSWAVE_CYCLES."""
+def _issue_times(cycles=None) -> list[dt.datetime]:
+    """Every forecast run from cfg.START_DATE to cfg.END_DATE at fcfg.GFSWAVE_CYCLES (or `cycles`)."""
+    cycles = fcfg.GFSWAVE_CYCLES if cycles is None else cycles
     issues = []
     day = cfg.START_DATE
     while day < cfg.END_DATE:
-        issues += [day.replace(hour=h) for h in fcfg.GFSWAVE_CYCLES]
+        issues += [day.replace(hour=h) for h in cycles]
         day += dt.timedelta(days=1)
     return issues
 
@@ -248,6 +253,16 @@ def download_gfswave_spectra_cycle(issue: dt.datetime, overwrite: bool = False):
     print(f"{filename.name}: {len(stations)} stations written")
 
 
+def download_gfswave_nowcast(overwrite: bool = False, max_workers: int = 4):
+    """Nowcast fields: the shortest lead times (fcfg.GFSWAVE_NOWCAST_LEAD_HOURS) of the runs at
+    fcfg.GFSWAVE_NOWCAST_CYCLES, into fcfg.GFSWAVE_NOWCAST_DIR. Together with the 00z runs this gives the
+    latest available GFS state at every 3-hourly valid time (history features of the spectrum model)."""
+    fcfg.GFSWAVE_NOWCAST_DIR.mkdir(parents=True, exist_ok=True)
+    _run_parallel(lambda issue: download_gfswave_cycle(issue, overwrite, fcfg.GFSWAVE_NOWCAST_LEAD_HOURS,
+                                                       fcfg.GFSWAVE_NOWCAST_DIR),
+                  _issue_times(fcfg.GFSWAVE_NOWCAST_CYCLES), max_workers)
+
+
 def download_gfswave_spectra(overwrite: bool = False, max_workers: int = 4):
     """Point spectra of every run from cfg.START_DATE to cfg.END_DATE at fcfg.GFSWAVE_SPEC_STATIONS."""
     fcfg.GFSWAVE_SPEC_DIR.mkdir(parents=True, exist_ok=True)
@@ -259,8 +274,11 @@ if __name__ == '__main__':
 
     ap = argparse.ArgumentParser(description="Download archived GFS-Wave forecasts")
     ap.add_argument("--spectra", action="store_true", help="download the point spectra instead of the gridded fields")
+    ap.add_argument("--nowcast", action="store_true", help="download the nowcast fields (06/12/18z f000/f003)")
     args = ap.parse_args()
     if args.spectra:
         download_gfswave_spectra()
+    elif args.nowcast:
+        download_gfswave_nowcast()
     else:
         download_gfswave()

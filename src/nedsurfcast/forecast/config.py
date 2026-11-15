@@ -27,6 +27,11 @@ GFSWAVE_FIELDS = [
     *[f"{var}:{n} in sequence" for n in (1, 2, 3) for var in ("SWELL", "SWPER", "SWDIR")],
 ]
 GFSWAVE_DIR = cfg.RAW_DIR / "gfswave"
+# Nowcast: the shortest lead times of the other cycles. With the 00z runs, every 3-hourly valid time gets the
+# latest GFS state (f000 at 00/06/12/18z, f003 in between). Used for the history before the issue time.
+GFSWAVE_NOWCAST_CYCLES = [6, 12, 18]
+GFSWAVE_NOWCAST_LEAD_HOURS = [0, 3]
+GFSWAVE_NOWCAST_DIR = cfg.RAW_DIR / "gfswave_nowcast"
 
 # GFS-Wave point output: full 2D spectra at a few stations (gfs.YYYYMMDD/HH/wave/station/bulls.tHHz/gfswave.<ID>.spec)
 GFSWAVE_SPEC_STATIONS = {"K13": "K133", "EURO": "EPL3"}   # GFS station -> RWS spectrum station at the same spot
@@ -80,6 +85,11 @@ BUOY_PARTITION_KWARGS = dict(                 # passed to partition_spectrum
 )
 
 """ Partition dataset: GFS wave systems matched to buoy wave systems (forecast/preprocess.py) """
+# JONSWAP shape per GFS partition when rebuilding a 1D spectrum (common.partition.shape_parameters): gamma
+# and tail exponent n (E ~ f^-n) from "lo" below t_lo to "hi" above t_hi seconds peak period. Fitted to GFS's
+# own point spectra at K13/EURO by forecast/fit_spectrum_shape.py (classic JONSWAP: gamma 3.3, n 5).
+# The hi values sit on the bounds (gamma >= 1, n >= 3): GFS's long-period partitions are broad.
+GFS_SPECTRUM_SHAPE = dict(t_lo=8, t_hi=14, gamma=(1.74, 1.00), tail=(4.40, 3.00))
 MERGE_GFS = True                              # merge GFS partitions a 1D buoy cannot resolve (common.partition.merge_unresolvable)
 MATCH_KWARGS = dict(                          # common.partition.match_partitions; use the same for training and evaluation
     max_dist=2.0,                             # normalised distance gate

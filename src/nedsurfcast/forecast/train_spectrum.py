@@ -7,6 +7,10 @@ belongs to which GFS system), the model corrects the whole 1D spectrum at a stat
 
     input   GFS spectrum rebuilt from its partitions (forecast/preprocess.py, group "spectra"):
             log energy and energy-weighted direction per 10 mHz bin, plus bulk GFS context
+            + (feature set "+history") the change of the rebuilt GFS spectrum over the previous 6/12/24 h
+              (HISTORY_LAGS) per bin, or ("+history-bands") per period band: Hm0, mean frequency and
+              mean direction; from the same run, or before the issue time from the GFS nowcast
+              (f000/f003 of the 06/12/18z runs), so only data known at the issue time
             + (models marked "gfs+obs") the GFS error at ISSUE time: the buoy spectrum measured around
               the issue time minus the GFS spectrum at lead 0, in the same form as the target. A GFS run
               is published ~3.5 h after its issue time, so this measurement is known when the forecast
@@ -78,6 +82,7 @@ SWELL_F_MAX = 1 / 6             # Hz; bins below this count as the swell band fo
 
 EVAL_MIN_LEAD = 3               # h; scores leave out lead 0, where the issue-time measurement is the target
 SCORE_LEADS = [3, 6, 12, 24, 48, 72]
+HISTORY_LAGS = (6, 12, 24)      # h; feature set "history": change of the GFS spectrum over these lags
 
 
 class PersistIssueError:
@@ -98,7 +103,7 @@ def _mlp():
     return make_pipeline(
         SimpleImputer(strategy="median"), StandardScaler(),
         MLPRegressor(hidden_layer_sizes=(128, 64), alpha=1e-3, learning_rate_init=1e-3, batch_size=256,
-                     max_iter=60, early_stopping=True, n_iter_no_change=5, random_state=0))
+                     max_iter=40, early_stopping=True, n_iter_no_change=5, random_state=0))
 
 
 # name -> (factory, feature set): "gfs" = GFS spectrum + context, "gfs+obs" = also the issue-time GFS error
@@ -139,6 +144,7 @@ def load_data() -> dict:
     for v in variables:
         data[f"issue_{v}"] = spec[v].values[it, 0, ist].astype(float)
     data["has_issue_obs"] = has[it, 0, ist]
+    data["index"] = (it, il, ist)                                 # into (time, lead_hours, station)
     data["freq"] = spec["freq"].values
     meta = pd.DataFrame({
         "time": spec["time"].values[it], "station": spec["station"].values[ist],
@@ -158,11 +164,103 @@ def issue_error(data: dict) -> np.ndarray:
     return np.nan_to_num(err)
 
 
+def _history_pairs(data: dict, lags=HISTORY_LAGS) -> list[tuple]:
+    """Per lag: (energy, direction) of the rebuilt GFS spectrum at the valid time and `lag` hours earlier
+    (group "gfs_rebuilt"); the earlier one is NaN where it does not exist.
+
+    The earlier spectrum comes from the same run if lead - lag >= 0. Before the issue time it is the GFS
+    nowcast at that valid time (group "gfs_nowcast": f000/f003 of the latest 00/06/12/18z run), and only
+    where that is missing the run issued 24 h earlier (lead - lag + 24). Everything exists at the issue
+    time, no future information.
+    """
+    if "history_pairs" in data:
+        return data["history_pairs"]
+    reb = load("gfs_rebuilt")
+    e_all, d_all = reb["energy"].values.astype(float), reb["direction"].values.astype(float)
+    times, leads = reb["time"].values, list(reb["lead_hours"].values)
+    nc = load("gfs_nowcast")
+    assert list(nc["station"].values) == list(reb["station"].values)
+    e_nc, d_nc, nc_times = nc["energy"].values.astype(float), nc["direction"].values.astype(float), nc["valid_time"].values
+    it, il, ist = data["index"]
+    lead = np.asarray(leads)[il]
+    now = (e_all[it, il, ist], d_all[it, il, ist])
+    pairs = []
+    for lag in lags:
+        same_run = lead - lag >= 0
+        prev_lead = np.where(same_run, lead - lag, lead - lag + 24)
+        prev_time = np.where(same_run, times[it], times[it] - np.timedelta64(24, "h"))
+        jt = np.searchsorted(times, prev_time)
+        ok = (jt < len(times)) & (prev_lead <= max(leads))
+        ok[ok] &= times[jt[ok]] == prev_time[ok]
+        jl = np.searchsorted(leads, np.clip(prev_lead, 0, max(leads)))
+        e_prev, d_prev = np.full_like(now[0], np.nan), np.full_like(now[1], np.nan)
+        e_prev[ok], d_prev[ok] = e_all[jt[ok], jl[ok], ist[ok]], d_all[jt[ok], jl[ok], ist[ok]]
+
+        # before the issue time: nowcast at the earlier valid time, where it exists
+        valid_prev = times[it] + (lead - lag).astype("timedelta64[h]")
+        jn = np.clip(np.searchsorted(nc_times, valid_prev), 0, len(nc_times) - 1)
+        use = ~same_run & (nc_times[jn] == valid_prev)
+        use[use] &= np.isfinite(e_nc[jn[use], ist[use]]).all(1)
+        e_prev[use], d_prev[use] = e_nc[jn[use], ist[use]], d_nc[jn[use], ist[use]]
+        print(f"  history lag {lag} h: {(~same_run).mean():.1%} before the issue time, "
+              f"of which {use.sum() / max((~same_run).sum(), 1):.1%} from the nowcast")
+        pairs.append((now, (e_prev, d_prev)))
+    data["history_pairs"] = pairs
+    return pairs
+
+
+def history_features(data: dict) -> np.ndarray:
+    """Per bin, per lag: change of sqrt(E) and of the energy-weighted direction vectors (valid time minus
+    `lag` hours earlier). Missing earlier spectra (no previous run) -> 0, i.e. "no change"."""
+    blocks = []
+    for (e_now, d_now), (e_prev, d_prev) in _history_pairs(data):
+        s_now, c_now = _weighted_vector(e_now, d_now)
+        s_prev, c_prev = _weighted_vector(e_prev, d_prev)
+        blocks.append(np.nan_to_num(np.hstack([np.sqrt(e_now) - np.sqrt(e_prev), s_now - s_prev, c_now - c_prev])))
+    return np.hstack(blocks)
+
+
+def _band_summary(energy: np.ndarray, direction: np.ndarray, f: np.ndarray) -> np.ndarray:
+    """Per period band: Hm0, energy-weighted mean frequency and the unit vector of the energy-weighted mean
+    direction -> (n, 4 * n_bands); mean frequency and direction are NaN in an empty band."""
+    df = float(np.median(np.diff(f)))
+    rad = np.deg2rad(np.nan_to_num(direction))
+    out = []
+    for lo, hi in PERIOD_BANDS.values():
+        sel = (f >= lo) & (f < hi)
+        e = np.nan_to_num(energy[:, sel])
+        m0 = e.sum(1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            f_mean = (e * f[sel]).sum(1) / m0
+            vs, vc = (e * np.sin(rad[:, sel])).sum(1), (e * np.cos(rad[:, sel])).sum(1)
+            norm = np.hypot(vs, vc)
+            out += [4 * np.sqrt(m0 * df), np.where(m0 > 0, f_mean, np.nan), vs / norm, vc / norm]
+    hm0_missing = ~np.isfinite(energy).all(1)
+    arr = np.column_stack(out)
+    arr[hm0_missing] = np.nan
+    return arr
+
+
+def history_band_features(data: dict) -> np.ndarray:
+    """Per period band and lag: change of Hm0, mean frequency (dispersion drift) and mean direction vector.
+    36 features for 3 bands and 3 lags. Missing values (empty band, no previous run) -> 0 ("no change")."""
+    f = data["freq"]
+    blocks = [np.nan_to_num(_band_summary(*now, f) - _band_summary(*prev, f)) for now, prev in _history_pairs(data)]
+    return np.hstack(blocks)
+
+
 def features(data: dict, feature_set: str = "gfs") -> np.ndarray:
-    base = _gfs_features(data)
-    if feature_set == "gfs":
-        return base
-    return np.hstack([base, issue_error(data), data["has_issue_obs"][:, None].astype(float)])
+    """feature_set: "gfs", optionally with "+obs" (issue-time GFS error) and/or the change of the GFS
+    spectrum over HISTORY_LAGS: "+history" (per bin) or "+history-bands" (per period band)."""
+    parts = feature_set.split("+")
+    blocks = [_gfs_features(data)]
+    if "history" in parts:
+        blocks.append(history_features(data))
+    if "history-bands" in parts:
+        blocks.append(history_band_features(data))
+    if "obs" in parts:                       # last: PersistIssueError reads the issue error from the end
+        blocks += [issue_error(data), data["has_issue_obs"][:, None].astype(float)]
+    return np.hstack(blocks)
 
 
 def _gfs_features(data: dict) -> np.ndarray:

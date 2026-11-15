@@ -75,11 +75,27 @@ If 2 beats 1, the model beats the GFS forecast. The downside is that there are o
 Train an MLP and compare it to the spectra of the 2 stations that are predicted by GFS. Only perform the leave-one-group training on the folds that hold-out K113 and EPL3. Do not save the predicted spectra (and the label spectra etc.) to the zarr file, i am only interested in the table results for now.
 
 
-Change jonswap to the raw swell values. The model should learn how they interact with the final wave spectrum?
+There are 2 problems that need to be addressed:
+1. The MLP overfits on the buoy measurements.
+2. Long period swells still see a drop in performance compared to the long period swells predicted by raw gfs output. 
+Focus on 2 for now. Create a script that shows examples of spectra that are dominated by long period swells. I want the raw gfs spectrum, the corrected spectrum by the model and the measured spectrum. Use ridge regression without the buoy measurement at issue time. 
+
+A u-net like network could potentially learn the age/width of the swell by using the wind patterns of the entire region of the days before. Could this be a logical the next step?
 
 
+I think the best way forward is to add variables that influence swell width. A couple options are:
+1. Adding a wind series of the timesteps preceeding the lead time.
+2. A reconstructed wave spectrum based on GFS partitions can be created of the timesteps preceeding a given lead time. 
+Which one would you recommend?
+
+Use 2.
+The data comes from the previous forecast for now. Use nowcasting data to improve it.
+Use the already downloaded forecasts for now as data preceeding the lead time for the model. The model should receive the difference between the previous spectrum and the current spectrum as features. This is to prevent overfitting. Test the new dataset on ridge regression without buoy measurements as input.
+
+Set the max epochs to 40. Combine the leave-one-group and the blocked-time evaluation method into a single evaluation. Train the model on 2 folds, with K113 and epl3 left out. Both folds should leave a time block out of the training data. During testing, use the to the model unknown stations and time block to evaluate the performance.
 
 
+Meerdere models trainen, kijken hoe epistemic/aleatoric uncertainty zich verhouden
 
 
 

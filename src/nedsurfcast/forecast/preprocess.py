@@ -22,8 +22,14 @@ Zarr groups (one store, fcfg.PARTITION_ZARR):
     samples        (sample,)         one row per merged GFS system at a station
     misses         (miss,)           buoy systems that no GFS system matched
     spectra        (time, lead_hours, station, freq)   averaged buoy spectrum (energy, direction, spread)
-                                     and the GFS spectrum rebuilt from its partitions (JONSWAP per partition,
-                                     common.partition.synthesize_spectrum) on the same frequency bins
+                                     and the GFS spectrum rebuilt from its partitions (JONSWAP per partition
+                                     with fcfg.GFS_SPECTRUM_SHAPE, common.partition.synthesize_spectrum)
+                                     on the same frequency bins
+    gfs_station_spectra (time, lead_hours, station, freq)   GFS's own point spectra at K133/EPL3
+    gfs_rebuilt    (time, lead_hours, station, freq)   the rebuilt GFS spectrum at EVERY run/lead/station,
+                                     also without a buoy spectrum (history features of the spectrum model)
+    gfs_nowcast    (valid_time, station, freq)   rebuilt spectrum of the latest GFS state (f000/f003 of the
+                                     00/06/12/18z runs): history features before the issue time
 
 `time` is the issue time; valid_time = time + lead_hours. Samples and misses index the other
 groups with time_idx, lead_idx and station. Residuals are not stored: compute them in the model
@@ -42,8 +48,9 @@ import xarray as xr
 from nedsurfcast import config as cfg
 from nedsurfcast.common.buoys import match_to_sea_cell
 from nedsurfcast.common.grouping import group_points
-from nedsurfcast.common.partition import (average_spectra, load_spectra, match_partitions, merge_unresolvable,
-                                          partition_dataset, partition_distance, synthesize_spectrum)
+from nedsurfcast.common.partition import (average_spectra, jonswap, load_spectra, match_partitions,
+                                          merge_unresolvable, partition_dataset, partition_distance,
+                                          shape_parameters, synthesize_spectrum)
 from nedsurfcast.forecast import config as fcfg
 
 GRID_STEP = 0.25            # deg, GFS global.0p25
@@ -220,14 +227,15 @@ def build_partition_dataset() -> dict[str, xr.Dataset]:
     def cell_spectrum(it, il, c):
         # rebuilt from the raw (unmerged) partitions: the energies add up, so merging is irrelevant here
         if (it, il, c) not in gfs_spec_cache:
-            gfs_spec_cache[(it, il, c)] = synthesize_spectrum(gfs_parts(hs[it, il, c], tp[it, il, c], dr[it, il, c]), f_spec)
+            gfs_spec_cache[(it, il, c)] = synthesize_spectrum(gfs_parts(hs[it, il, c], tp[it, il, c], dr[it, il, c]), f_spec,
+                                                               fcfg.GFS_SPECTRUM_SHAPE)
         return gfs_spec_cache[(it, il, c)]
 
     def cell_systems(it, il, c):
         if (it, il, c) not in cache:
             p = gfs_parts(hs[it, il, c], tp[it, il, c], dr[it, il, c])
             if fcfg.MERGE_GFS:
-                p = merge_unresolvable(p, f_buoy, **fcfg.BUOY_PARTITION_KWARGS)
+                p = merge_unresolvable(p, f_buoy, fcfg.GFS_SPECTRUM_SHAPE, **fcfg.BUOY_PARTITION_KWARGS)
             cache[(it, il, c)] = p[np.isfinite(p[:, 0])] if len(p) else p
         return cache[(it, il, c)]
 
@@ -320,7 +328,7 @@ def build_partition_dataset() -> dict[str, xr.Dataset]:
         out["spectra"][v].attrs = {"units": "m2/Hz"}
     for v in ("buoy_direction", "gfs_direction", "buoy_spread"):
         out["spectra"][v].attrs = {"units": "degree"}
-    out["spectra"]["gfs_energy"].attrs["long_name"] = "JONSWAP (gamma 3.3) per GFS partition, summed; only where a buoy spectrum exists"
+    out["spectra"]["gfs_energy"].attrs["long_name"] = "JONSWAP per GFS partition (fcfg.GFS_SPECTRUM_SHAPE), summed; only where a buoy spectrum exists"
     out["samples"] = _table_to_dataset(pd.DataFrame(samples), "sample", pts, valid)
     out["misses"] = _table_to_dataset(pd.DataFrame(misses), "miss", pts, valid)
     return out
@@ -349,6 +357,7 @@ def save(groups: dict[str, xr.Dataset]):
         "match_kwargs": json.dumps(fcfg.MATCH_KWARGS),
         "buoy_partition_kwargs": json.dumps(fcfg.BUOY_PARTITION_KWARGS),
         "buoy_spectra_window": fcfg.BUOY_SPECTRA_WINDOW,
+        "gfs_spectrum_shape": json.dumps(fcfg.GFS_SPECTRUM_SHAPE),
         "period": f"{cfg.START_DATE:%Y-%m-%d}..{cfg.END_DATE:%Y-%m-%d}",
     }
     if fcfg.PARTITION_ZARR.exists():
@@ -486,15 +495,136 @@ def append_gfs_station_spectra():
     print(f"  wrote group gfs_station_spectra: {dict(ds.sizes)}")
 
 
+# ---------------------------------------------------------------------------
+# 6. REBUILT GFS SPECTRA AT EVERY RUN, LEAD AND STATION
+# ---------------------------------------------------------------------------
+
+def _cell_parts(cell: xr.Dataset) -> np.ndarray:
+    """GFS fields at one or more cells (no lat/lon dims) -> (..., partition, hs/tp/dir), partition 0 = wind sea."""
+    return np.stack([np.concatenate([cell[w].values[..., None], cell[sw].transpose(..., "swell_partition").values], -1)
+                     for w, sw in (("WVHGT", "SWELL"), ("WVPER", "SWPER"), ("WVDIR", "SWDIR"))], -1)
+
+
+def _spectra_from_parts(p: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(rows, 4, 3) GFS partitions -> rebuilt energy and energy-weighted direction (rows, n_freq);
+    NaN where no partition is present (missing run)."""
+    present = np.isfinite(p[:, :, :2]).all(-1) & (np.nan_to_num(p[:, :, 0]) > 0)
+    i, j = np.nonzero(present)
+    hs, fp, rad = p[i, j, 0], 1 / p[i, j, 1], np.deg2rad(p[i, j, 2])
+    gamma, n = shape_parameters(fp, fcfg.GFS_SPECTRUM_SHAPE)
+    e_k = jonswap(f, hs, fp, gamma, n)                                   # (partitions, freq)
+    e, es, ec = (np.zeros((len(p), len(f))) for _ in range(3))
+    np.add.at(e, i, e_k)
+    np.add.at(es, i, e_k * np.sin(rad)[:, None])
+    np.add.at(ec, i, e_k * np.cos(rad)[:, None])
+    d = np.where(e > 0, np.rad2deg(np.arctan2(es, ec)) % 360, np.nan)
+    e[~present.any(1)] = np.nan
+    return e, d
+
+
+def rebuild_gfs_station_spectra() -> xr.Dataset:
+    """GFS spectrum rebuilt from the partitions at each station's nearest cell (same shape as the group
+    "spectra"), for EVERY run, lead time and station, also where no buoy spectrum exists. Used for the
+    history features of the spectrum model (the spectrum at earlier valid times)."""
+    stations = load("stations").load()
+    grid = load("grid")
+    f_buoy, f_sel = spectrum_freqs()
+    f = f_buoy[f_sel]
+    names = list(stations.station.values)
+    shape = (grid.sizes["time"], grid.sizes["lead_hours"], len(names), len(f))
+    energy = np.full(shape, np.nan, dtype=np.float32)
+    direction = np.full(shape, np.nan, dtype=np.float32)
+    for k, st in enumerate(names):
+        cell = grid.sel(lat=float(stations["nearest_lat"].sel(station=st)),
+                        lon=float(stations["nearest_lon"].sel(station=st))).load()
+        e, d = _spectra_from_parts(_cell_parts(cell).reshape(-1, 4, 3), f)
+        energy[:, :, k] = e.reshape(shape[0], shape[1], -1)
+        direction[:, :, k] = d.reshape(shape[0], shape[1], -1)
+    return xr.Dataset(
+        {"energy": (("time", "lead_hours", "station", "freq"), energy, {"units": "m2/Hz"}),
+         "direction": (("time", "lead_hours", "station", "freq"), direction,
+                       {"units": "degree", "long_name": "mean direction per bin, coming from"})},
+        coords={"time": grid["time"].values, "lead_hours": grid["lead_hours"].values, "station": names, "freq": f},
+        attrs={"description": "GFS spectrum rebuilt from the partitions at the nearest cell, every run/lead/station",
+               "gfs_spectrum_shape": json.dumps(fcfg.GFS_SPECTRUM_SHAPE)})
+
+
+def rebuild_gfs_nowcast() -> xr.Dataset:
+    """Rebuilt GFS spectrum of the latest GFS state at every 3-hourly valid time and station: f000 of the
+    00/06/12/18z runs, f003 in between (00z runs from the grid, the others from fcfg.GFSWAVE_NOWCAST_DIR).
+    Used for history features before the issue time, instead of the previous day's forecast."""
+    stations = load("stations").load()
+    grid = load("grid")
+    f_buoy, f_sel = spectrum_freqs()
+    f = f_buoy[f_sel]
+    names = list(stations.station.values)
+    lats = xr.DataArray(stations["nearest_lat"].values, dims="station")
+    lons = xr.DataArray(stations["nearest_lon"].values, dims="station")
+    fields = ["WVHGT", "WVPER", "WVDIR", "SWELL", "SWPER", "SWDIR"]
+    leads = fcfg.GFSWAVE_NOWCAST_LEAD_HOURS
+
+    def collect(ds):            # (time, lead_hours, ...) -> valid times and partitions (rows, station, 4, 3)
+        pts = ds[fields].sel(lead_hours=leads).sel(lat=lats, lon=lons).load()
+        valid = (pts["time"].values[:, None] + pts["lead_hours"].values[None, :].astype("timedelta64[h]")).ravel()
+        p = _cell_parts(pts.transpose("time", "lead_hours", "station", ...))
+        return valid, p.reshape(-1, len(names), 4, 3)
+
+    pieces = [collect(grid)]
+    start, end = pd.Timestamp(cfg.START_DATE), pd.Timestamp(cfg.END_DATE)
+    files = [fl for fl in sorted(fcfg.GFSWAVE_NOWCAST_DIR.glob("gfswave_[0-9]*_[0-9][0-9]z.nc"))
+             if start <= pd.to_datetime(fl.stem.split("_")[1]) < end]
+    if not files:
+        raise FileNotFoundError(f"No nowcast runs in {fcfg.GFSWAVE_NOWCAST_DIR}; "
+                                "run python -m nedsurfcast.download.gfs --nowcast")
+    for fl in files:
+        with xr.open_dataset(fl) as ds:
+            ds = ds.rename({k: v for k, v in fcfg.GFSWAVE_VAR_NAMES.items() if k in ds.data_vars})
+            pieces.append(collect(ds.expand_dims("time")))
+    valid = np.concatenate([v for v, _ in pieces])
+    parts = np.concatenate([p for _, p in pieces])
+    valid, first = np.unique(valid, return_index=True)          # sorted; the runs do not overlap
+    e, d = _spectra_from_parts(parts[first].reshape(-1, 4, 3), f)
+    shape = (len(valid), len(names), len(f))
+    print(f"  nowcast: {len(files)} extra runs, {len(valid)} valid times, "
+          f"{np.isfinite(e).all(1).mean():.1%} of (valid time, station) present")
+    return xr.Dataset(
+        {"energy": (("valid_time", "station", "freq"), e.reshape(shape).astype(np.float32), {"units": "m2/Hz"}),
+         "direction": (("valid_time", "station", "freq"), d.reshape(shape).astype(np.float32),
+                       {"units": "degree", "long_name": "mean direction per bin, coming from"})},
+        coords={"valid_time": valid, "station": names, "freq": f},
+        attrs={"description": "GFS spectrum rebuilt from the latest run (f000/f003) at every valid time and station",
+               "gfs_spectrum_shape": json.dumps(fcfg.GFS_SPECTRUM_SHAPE)})
+
+
+def _append_group(name: str, ds: xr.Dataset):
+    """Add (or replace) one group in fcfg.PARTITION_ZARR without rebuilding the other groups."""
+    group_dir = fcfg.PARTITION_ZARR / name
+    if group_dir.exists():
+        shutil.rmtree(group_dir)
+    ds.to_zarr(str(fcfg.PARTITION_ZARR), group=name, mode="a")
+    print(f"  wrote group {name}: {dict(ds.sizes)}")
+
+
+def append_gfs_rebuilt():
+    """(Re)build the groups gfs_rebuilt and gfs_nowcast (history features of the spectrum model)."""
+    _append_group("gfs_rebuilt", rebuild_gfs_station_spectra())
+    _append_group("gfs_nowcast", rebuild_gfs_nowcast())
+
+
 if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="Build the forecast dataset")
     ap.add_argument("--station-spectra", action="store_true",
                     help="only (re)build the gfs_station_spectra group in the existing dataset")
+    ap.add_argument("--rebuilt-spectra", action="store_true",
+                    help="only (re)build the gfs_rebuilt and gfs_nowcast groups in the existing dataset")
     args = ap.parse_args()
-    if not args.station_spectra:
+    if not (args.station_spectra or args.rebuilt_spectra):
         groups = build_partition_dataset()
         save(groups)
         report(groups["samples"], groups["misses"], groups["station_times"])
-    append_gfs_station_spectra()
+    if not args.rebuilt_spectra:
+        append_gfs_station_spectra()
+    if not args.station_spectra:
+        append_gfs_rebuilt()
