@@ -5,7 +5,8 @@ Correct the GFS wave spectrum towards the buoy spectrum, then partition it
 Instead of correcting GFS wave systems one by one (which needs matching to know which buoy system
 belongs to which GFS system), the model corrects the whole 1D spectrum at a station:
 
-    input   GFS spectrum rebuilt from its partitions (forecast/preprocess.py, group "spectra"):
+    input   GFS spectrum rebuilt from its partitions (forecast/preprocess.py, group "spectra"), scaled to
+            GFS's HTSGW of the same time step (SCALE_TO_HTSGW, htsgw_factor):
             log energy and energy-weighted direction per 10 mHz bin, plus bulk GFS context
             + (feature set "+history") the change of the rebuilt GFS spectrum over the previous 6/12/24 h
               (HISTORY_LAGS) per bin, or ("+history-bands") per period band: Hm0, mean frequency and
@@ -72,6 +73,7 @@ from nedsurfcast.common.angles import wrap_angle
 from nedsurfcast.common.partition import match_partitions, partition_spectrum
 from nedsurfcast.common.validation import FOLDS, N_TIME_BLOCKS, rmse
 from nedsurfcast.forecast import config as fcfg
+from nedsurfcast.forecast.location import fetch_limited_log_ratio, load_station_location, lookup, tanh_kh
 from nedsurfcast.forecast.preprocess import load
 
 EPS = 1e-3                      # m2/Hz added before logs (features, log score) and in the direction weights
@@ -83,6 +85,7 @@ SWELL_F_MAX = 1 / 6             # Hz; bins below this count as the swell band fo
 EVAL_MIN_LEAD = 3               # h; scores leave out lead 0, where the issue-time measurement is the target
 SCORE_LEADS = [3, 6, 12, 24, 48, 72]
 HISTORY_LAGS = (6, 12, 24)      # h; feature set "history": change of the GFS spectrum over these lags
+SCALE_TO_HTSGW = True           # scale every rebuilt GFS spectrum to Hm0 = GFS's HTSGW (see htsgw_factor)
 
 
 class PersistIssueError:
@@ -99,11 +102,18 @@ class PersistIssueError:
         return X[:, -(self.n_out + 1):-1]
 
 
+MLP_BACKEND = "torch"           # "torch": common.torch_mlp on the GPU if available; "sklearn": MLPRegressor (CPU)
+MLP_KWARGS = dict(hidden_layer_sizes=(128, 64), alpha=1e-3, learning_rate_init=1e-3, batch_size=256,
+                  max_iter=40, early_stopping=True, n_iter_no_change=5, random_state=0)
+
+
 def _mlp():
-    return make_pipeline(
-        SimpleImputer(strategy="median"), StandardScaler(),
-        MLPRegressor(hidden_layer_sizes=(128, 64), alpha=1e-3, learning_rate_init=1e-3, batch_size=256,
-                     max_iter=40, early_stopping=True, n_iter_no_change=5, random_state=0))
+    if MLP_BACKEND == "torch":
+        from nedsurfcast.common.torch_mlp import TorchMLPRegressor
+        net = TorchMLPRegressor(**MLP_KWARGS)
+    else:
+        net = MLPRegressor(**MLP_KWARGS)
+    return make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), net)
 
 
 # name -> (factory, feature set): "gfs" = GFS spectrum + context, "gfs+obs" = also the issue-time GFS error
@@ -128,6 +138,19 @@ def _weighted_vector(energy, direction):
     return w * np.sin(rad), w * np.cos(rad)
 
 
+def htsgw_factor(energy: np.ndarray, htsgw: np.ndarray, f: np.ndarray) -> np.ndarray:
+    """Energy factor (HTSGW / Hm0)^2 per spectrum, Hm0 of the rebuilt spectrum over its frequency grid (the
+    buoy's range): the scaled spectrum has GFS's total wave height of the predicted time step and the shape
+    of the partitions. 1 where it cannot be computed (empty spectrum, missing HTSGW) or SCALE_TO_HTSGW is off."""
+    if not SCALE_TO_HTSGW:
+        return np.ones(energy.shape[:-1])
+    df = float(np.median(np.diff(f)))
+    hm0 = 4 * np.sqrt(energy.sum(-1) * df)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        fac = (htsgw / hm0) ** 2
+    return np.where(np.isfinite(fac) & (hm0 > 0), fac, 1.0)
+
+
 def load_data() -> dict:
     """Every (run, lead, station) with a buoy spectrum -> arrays (n, n_freq) + a meta table for the folds."""
     spec = load("spectra").load()
@@ -144,6 +167,18 @@ def load_data() -> dict:
     for v in variables:
         data[f"issue_{v}"] = spec[v].values[it, 0, ist].astype(float)
     data["has_issue_obs"] = has[it, 0, ist]
+    # the reconstruction scaled to GFS's HTSGW of the predicted time step (and of lead 0 for the issue time)
+    reb = load("gfs_rebuilt")
+    for c in ("time", "lead_hours", "station"):
+        assert (reb[c].values == spec[c].values).all(), f"gfs_rebuilt and spectra differ in {c}"
+    # HTSGW bilinear at the station (as scored against the buoy); nearest cell where that is missing
+    hts = st["gfs_htsgw"].values
+    hts = np.where(np.isfinite(hts), hts, reb["htsgw"].values)
+    f = spec["freq"].values
+    data["gfs_energy_unscaled"] = data["gfs_energy"].copy()
+    data["htsgw_factor"] = htsgw_factor(data["gfs_energy"], hts[it, il, ist], f)
+    data["gfs_energy"] *= data["htsgw_factor"][:, None]
+    data["issue_gfs_energy"] *= htsgw_factor(data["issue_gfs_energy"], hts[it, 0, ist], f)[:, None]
     data["index"] = (it, il, ist)                                 # into (time, lead_hours, station)
     data["freq"] = spec["freq"].values
     meta = pd.DataFrame({
@@ -177,10 +212,12 @@ def _history_pairs(data: dict, lags=HISTORY_LAGS) -> list[tuple]:
         return data["history_pairs"]
     reb = load("gfs_rebuilt")
     e_all, d_all = reb["energy"].values.astype(float), reb["direction"].values.astype(float)
+    e_all *= htsgw_factor(e_all, reb["htsgw"].values, reb["freq"].values)[..., None]   # nearest cell, as e_nc
     times, leads = reb["time"].values, list(reb["lead_hours"].values)
     nc = load("gfs_nowcast")
     assert list(nc["station"].values) == list(reb["station"].values)
     e_nc, d_nc, nc_times = nc["energy"].values.astype(float), nc["direction"].values.astype(float), nc["valid_time"].values
+    e_nc *= htsgw_factor(e_nc, nc["htsgw"].values, nc["freq"].values)[..., None]
     it, il, ist = data["index"]
     lead = np.asarray(leads)[il]
     now = (e_all[it, il, ist], d_all[it, il, ist])
@@ -241,6 +278,63 @@ def _band_summary(energy: np.ndarray, direction: np.ndarray, f: np.ndarray) -> n
     return arr
 
 
+def _station_location_rows(data: dict):
+    """The station location table and, per data row, the index of its station in it."""
+    loc = load_station_location()
+    names = loc["station"].values
+    st = data["meta"]["station"].to_numpy()
+    order = np.argsort(names)
+    k = order[np.clip(np.searchsorted(names, st, sorter=order), 0, len(names) - 1)]
+    assert (names[k] == st).all(), "stations missing from the location table: rebuild it"
+    return loc, k
+
+
+def _wind_from(data: dict) -> tuple[np.ndarray, np.ndarray]:
+    m = data["meta"]
+    u, v = m["gfs_u10"].to_numpy(), m["gfs_v10"].to_numpy()
+    return np.rad2deg(np.arctan2(-u, -v)) % 360, np.hypot(u, v)
+
+
+def fetch_features(data: dict) -> np.ndarray:
+    """Fetch mismatch between reality and GFS (forecast/location.py): in the wind direction log10(D_real /
+    D_GFS), the expected log10 Hs ratio of fetch-limited growth and log10(g D_real / U^2); in the mean
+    direction of the < 6 s and 6-10 s bands log10(D_real / D_GFS). 5 features, all 0 where GFS's coastline is
+    right, so not a fixed station identifier."""
+    loc, k = _station_location_rows(data)
+    real, gfs = loc["distance_to_land"].values[k], loc["gfs_distance_to_land"].values[k]
+    wind_from, speed = _wind_from(data)
+    xr_w, xg_w = lookup(real, wind_from), lookup(gfs, wind_from)
+    out = [np.log10(xr_w / xg_w), fetch_limited_log_ratio(xr_w, xg_w, speed),
+           np.log10(9.81 * xr_w * 1e3 / np.maximum(speed, 1.0) ** 2)]
+    summary = _band_summary(data["gfs_energy"], data["gfs_direction"], data["freq"])
+    for band in ("Tp < 6 s", "6-10 s"):
+        b = list(PERIOD_BANDS).index(band)
+        theta = np.rad2deg(np.arctan2(summary[:, 4 * b + 2], summary[:, 4 * b + 3])) % 360
+        out.append(np.log10(lookup(real, theta) / lookup(gfs, theta)))
+    return np.column_stack(out)
+
+
+def location_features(data: dict) -> np.ndarray:
+    """Location as seen by the incoming waves (forecast/location.py): per period band of the GFS spectrum,
+    log10 of the over-water distance to land in the band's mean direction, tanh(k h) at the station and
+    tanh(k h) along the incoming ray at the band's mean frequency; plus log10 of the fetch in the wind
+    direction. 10 features; NaN in an empty band (imputed). No fixed per-station values."""
+    loc, k = _station_location_rows(data)
+    dist, ray, h0 = loc["distance_to_land"].values[k], loc["ray_depth"].values[k], loc["depth"].values[k]
+    summary = _band_summary(data["gfs_energy"], data["gfs_direction"], data["freq"])   # (n, 4 per band)
+    out = []
+    for b in range(len(PERIOD_BANDS)):
+        f_mean, vs, vc = summary[:, 4 * b + 1], summary[:, 4 * b + 2], summary[:, 4 * b + 3]
+        theta = np.rad2deg(np.arctan2(vs, vc)) % 360
+        out += [np.log10(lookup(dist, theta)),
+                tanh_kh(f_mean, h0),
+                tanh_kh(f_mean, lookup(ray, theta))]
+    m = data["meta"]
+    wind_from = np.rad2deg(np.arctan2(-m["gfs_u10"].to_numpy(), -m["gfs_v10"].to_numpy())) % 360
+    out.append(np.log10(lookup(dist, wind_from)))
+    return np.column_stack(out)
+
+
 def history_band_features(data: dict) -> np.ndarray:
     """Per period band and lag: change of Hm0, mean frequency (dispersion drift) and mean direction vector.
     36 features for 3 bands and 3 lags. Missing values (empty band, no previous run) -> 0 ("no change")."""
@@ -251,9 +345,20 @@ def history_band_features(data: dict) -> np.ndarray:
 
 def features(data: dict, feature_set: str = "gfs") -> np.ndarray:
     """feature_set: "gfs", optionally with "+obs" (issue-time GFS error) and/or the change of the GFS
-    spectrum over HISTORY_LAGS: "+history" (per bin) or "+history-bands" (per period band)."""
+    spectrum over HISTORY_LAGS: "+history" (per bin) or "+history-bands" (per period band).
+    "+station" adds a one-hot station identifier, "station" alone is only that (per-station mean bias). Only
+    for diagnostics: a station identity does not exist at grid cells without a buoy.
+    "+location" adds depth and exposure as seen by the incoming bands (location_features): they can be
+    computed for any grid cell. "+fetch" adds the fetch mismatch between reality and GFS (fetch_features)."""
     parts = feature_set.split("+")
-    blocks = [_gfs_features(data)]
+    blocks = [_gfs_features(data)] if parts[0] == "gfs" else []
+    if "station" in parts:
+        st = data["meta"]["station"].to_numpy()
+        blocks.append((st[:, None] == np.unique(st)[None, :]).astype(float))
+    if "location" in parts:
+        blocks.append(location_features(data))
+    if "fetch" in parts:
+        blocks.append(fetch_features(data))
     if "history" in parts:
         blocks.append(history_features(data))
     if "history-bands" in parts:

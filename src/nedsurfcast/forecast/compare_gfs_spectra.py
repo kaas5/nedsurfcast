@@ -37,6 +37,7 @@ Run from anywhere with: python -m nedsurfcast.forecast.compare_gfs_spectra
 
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import Ridge
 
 from nedsurfcast.common.angles import wrap_angle
 from nedsurfcast.common.validation import TIME_GAP_HOURS, rmse
@@ -61,8 +62,36 @@ MODEL_VARIANTS = {                      # name -> (model factory, feature set)
     "ridge (GFS + history per band)": (MODELS["ridge"][0], "gfs+history-bands"),
     "mlp (GFS)": (_mlp, "gfs"),
     "mlp (GFS + history per band)": (_mlp, "gfs+history-bands"),
+    "ridge (GFS + location)": (MODELS["ridge"][0], "gfs+location"),
+    "mlp (GFS + location)": (_mlp, "gfs+location"),
+    "ridge (GFS + history per band + location)": (MODELS["ridge"][0], "gfs+history-bands+location"),
+    "mlp (GFS + history per band + location)": (_mlp, "gfs+history-bands+location"),
+    "ridge (GFS + location + fetch)": (MODELS["ridge"][0], "gfs+location+fetch"),
+    "ridge (GFS + history per band + location + fetch)": (MODELS["ridge"][0], "gfs+history-bands+location+fetch"),
+    "mlp (GFS + location + fetch)": (_mlp, "gfs+location+fetch"),
+    "mlp (GFS + history per band + location + fetch)": (_mlp, "gfs+history-bands+location+fetch"),
 }
 BASELINE = "GFS point spectrum"
+
+# Evaluation "station-bias" (--eval station-bias): can the models learn a bias correction PER STATION? All
+# stations train, K133 and EPL3 included; only the last autumn (issue times from AUTUMN_START, with
+# TEST_GAP_HOURS before it) is left out and is the test set at K133/EPL3. A station identifier (one-hot) is
+# offered as a feature; "station mean bias" is the mean training residual per station and bin. Diagnostic
+# only: neither the station identity nor training data at the station exist at grid cells without a buoy.
+AUTUMN_START = np.datetime64("2026-09-01")
+STATION_BIAS_VARIANTS = {
+    "station mean bias": (lambda: Ridge(alpha=1e-6), "station"),
+    "ridge (GFS)": MODEL_VARIANTS["ridge (GFS)"],
+    "ridge (GFS + station)": (MODELS["ridge"][0], "gfs+station"),
+    "ridge (GFS + location)": MODEL_VARIANTS["ridge (GFS + location)"],
+    "mlp (GFS)": MODEL_VARIANTS["mlp (GFS)"],
+    "mlp (GFS + station)": (_mlp, "gfs+station"),
+    "mlp (GFS + location)": MODEL_VARIANTS["mlp (GFS + location)"],
+}
+# "alternating-epl3": the alternating evaluation tested on EPL3 only (two folds: even and odd blocks), because
+# K133 lies far offshore, outside the training distribution of mostly coastal stations; K133 still trains.
+EVALUATIONS = {"alternating": MODEL_VARIANTS, "alternating-epl3": MODEL_VARIANTS,
+               "station-bias": STATION_BIAS_VARIANTS}
 
 
 # ---------------------------------------------------------------------------
@@ -93,16 +122,21 @@ def attach_point_spectra(data: dict) -> np.ndarray:
 # 2. MODELS ON THE FOLDS THAT HOLD OUT THE POINT-SPECTRUM STATIONS
 # ---------------------------------------------------------------------------
 
-def predict_held_out(data: dict, variants: dict = MODEL_VARIANTS) -> dict[str, np.ndarray]:
-    """Out-of-sample residuals of each model variant (name -> (factory, feature set)) for the rows of K133 and
-    EPL3, each trained with its station group held out."""
+def predict_held_out(data: dict, variants: dict = MODEL_VARIANTS, test_stations=None) -> dict[str, np.ndarray]:
+    """Out-of-sample residuals of each model variant (name -> (factory, feature set)) for the test stations
+    (default K133 and EPL3), each fold trained with the station's group and its test blocks held out.
+
+    Two stations: station k is tested on the alternating blocks k, k + 2, ... One station: two folds, on the
+    even and on the odd blocks, so that station is tested over the whole year."""
     m = data["meta"]
     Y = targets(data)
     X = {fs: features(data, fs) for _, fs in variants.values()}
     pred = {name: np.full(Y.shape, np.nan) for name in variants}
-    stations = list(fcfg.GFSWAVE_SPEC_STATIONS.values())
-    for k, station in enumerate(stations):
-        in_block, near_block, edges = test_block(m, k, len(stations))
+    stations = list(test_stations or fcfg.GFSWAVE_SPEC_STATIONS.values())
+    folds = [(stations[0], 0), (stations[0], 1)] if len(stations) == 1 else list(zip(stations, range(len(stations))))
+    n_folds = len(folds)
+    for station, k in folds:
+        in_block, near_block, edges = test_block(m, k, n_folds)
         print(f"  test blocks of {station}: {', '.join(f'{a:%Y-%m-%d}..{b:%m-%d}' for a, b in edges)}; "
               f"training also leaves out {TEST_GAP_HOURS} h on both sides of each")
         group = m.loc[m["station"] == station, "buoy_group"].iloc[0]
@@ -114,6 +148,24 @@ def predict_held_out(data: dict, variants: dict = MODEL_VARIANTS) -> dict[str, n
             pred[name][is_test] = np.clip(model.predict(X[fs][is_test]), Y[is_train].min(0), Y[is_train].max(0))
         print(f"  fold holding out {held_out} and the test block: trained on {int(is_train.sum())} spectra, "
               f"predicted {int(is_test.sum())} spectra of {station}")
+    return pred
+
+
+def predict_station_bias(data: dict, variants: dict = STATION_BIAS_VARIANTS) -> dict[str, np.ndarray]:
+    """Evaluation "station-bias": train on every station before the last autumn, predict K133/EPL3 in it."""
+    m = data["meta"]
+    Y = targets(data)
+    X = {fs: features(data, fs) for _, fs in variants.values()}
+    times = m["time"].to_numpy()
+    is_train = times < AUTUMN_START - np.timedelta64(TEST_GAP_HOURS, "h")
+    is_test = (times >= AUTUMN_START) & m["station"].isin(fcfg.GFSWAVE_SPEC_STATIONS.values()).to_numpy()
+    pred = {name: np.full(Y.shape, np.nan) for name in variants}
+    for name, (make, fs) in variants.items():
+        model = make().fit(X[fs][is_train], Y[is_train])
+        pred[name][is_test] = np.clip(model.predict(X[fs][is_test]), Y[is_train].min(0), Y[is_train].max(0))
+    print(f"  trained on {int(is_train.sum())} spectra of all stations (issue times before "
+          f"{AUTUMN_START - np.timedelta64(TEST_GAP_HOURS, 'h')}), predicted {int(is_test.sum())} spectra "
+          f"of K133/EPL3 from {AUTUMN_START}")
     return pred
 
 
@@ -173,9 +225,9 @@ def score_table(sets: dict, data: dict, rows: np.ndarray, by=None) -> pd.DataFra
     return pd.DataFrame(records).set_index(["group", "spectrum"])
 
 
-def skill(table: pd.DataFrame) -> pd.DataFrame:
+def skill(table: pd.DataFrame, baseline: str = BASELINE) -> pd.DataFrame:
     cols = [c for c in table.columns if c.startswith("rmse")]
-    base = table.xs(BASELINE, level="spectrum")[cols]
+    base = table.xs(baseline, level="spectrum")[cols]
     return 1 - table[cols].div(base.reindex(table.index, level="group"))
 
 
@@ -196,7 +248,8 @@ def by_lead(sets: dict, data: dict, rows: np.ndarray) -> pd.DataFrame:
 
 
 def bootstrap_skill(sets: dict, data: dict, rows: np.ndarray, metrics=("rmse sqrt(E)", "rmse Hm0 Tp > 10 s",
-                                                                        "rmse Hm0 6-10 s", "rmse Hm0")) -> pd.DataFrame:
+                                                                        "rmse Hm0 6-10 s", "rmse Hm0"),
+                    baseline: str = BASELINE) -> pd.DataFrame:
     """95% interval of 1 - RMSE_set / RMSE_baseline, resampling whole forecast runs (issue times)."""
     f = data["freq"]
     eb, db = data["buoy_energy"][rows], data["buoy_direction"][rows]
@@ -209,14 +262,14 @@ def bootstrap_skill(sets: dict, data: dict, rows: np.ndarray, metrics=("rmse sqr
     weights = np.stack([np.bincount(rng.integers(0, n_runs, n_runs), minlength=n_runs) for _ in range(BOOTSTRAP)])
     records = []
     for name in sets:
-        if name == BASELINE:
+        if name == baseline:
             continue
         rec = {"spectrum": name}
         for k in metrics:
             mse = (weights @ sums[name][k]) / (weights @ counts)
-            mse_base = (weights @ sums[BASELINE][k]) / (weights @ counts)
+            mse_base = (weights @ sums[baseline][k]) / (weights @ counts)
             s = 1 - np.sqrt(mse / mse_base)
-            point = 1 - np.sqrt(sums[name][k].sum() / sums[BASELINE][k].sum())
+            point = 1 - np.sqrt(sums[name][k].sum() / sums[baseline][k].sum())
             lo, hi = np.percentile(s, [2.5, 97.5])
             rec[k] = f"{point:+.1%} [{lo:+.1%}, {hi:+.1%}]"
         records.append(rec)
@@ -227,16 +280,19 @@ def bootstrap_skill(sets: dict, data: dict, rows: np.ndarray, metrics=("rmse sqr
 # 4. RUN
 # ---------------------------------------------------------------------------
 
-def run(models: list[str] | None = None):
-    """models: names from MODEL_VARIANTS to train (default all)."""
-    variants = {k: v for k, v in MODEL_VARIANTS.items() if models is None or k in models}
+def run(models: list[str] | None = None, evaluation: str = "alternating"):
+    """models: names from the evaluation's variants to train (default all); evaluation: see EVALUATIONS."""
+    variants = {k: v for k, v in EVALUATIONS[evaluation].items() if models is None or k in models}
     data = load_data()
     has_point = attach_point_spectra(data)
     m = data["meta"]
     print(f"{int(has_point.sum())} spectra of {sorted(fcfg.GFSWAVE_SPEC_STATIONS.values())} have a GFS point spectrum; "
           f"models: {list(variants)}")
 
-    pred = predict_held_out(data, variants)
+    if evaluation == "station-bias":
+        pred = predict_station_bias(data, variants)
+    else:
+        pred = predict_held_out(data, variants, ["EPL3"] if evaluation == "alternating-epl3" else None)
     rows = has_point & (m["lead_hours"].to_numpy() >= EVAL_MIN_LEAD)
     for p in pred.values():
         rows &= np.isfinite(p).all(1) | ~rows        # only rows that were predicted (K133/EPL3 in the test block)
@@ -271,11 +327,12 @@ def run(models: list[str] | None = None):
 
     out = fcfg.SPECTRUM_MODEL_DIR
     out.mkdir(parents=True, exist_ok=True)
-    overall.droplevel("group").to_csv(out / "gfs_point_comparison.csv")
-    per_station.to_csv(out / "gfs_point_comparison_per_station.csv")
-    leads.to_csv(out / "gfs_point_comparison_by_lead.csv")
-    boot.to_csv(out / "gfs_point_comparison_bootstrap.csv")
-    print(f"\nTables saved to {out} (gfs_point_*.csv)")
+    sfx = "" if evaluation == "alternating" else "_" + evaluation.replace("-", "_")
+    overall.droplevel("group").to_csv(out / f"gfs_point_comparison{sfx}.csv")
+    per_station.to_csv(out / f"gfs_point_comparison_per_station{sfx}.csv")
+    leads.to_csv(out / f"gfs_point_comparison_by_lead{sfx}.csv")
+    boot.to_csv(out / f"gfs_point_comparison_bootstrap{sfx}.csv")
+    print(f"\nTables saved to {out} (gfs_point_comparison*{sfx}.csv)")
     return overall, per_station, leads, boot
 
 
@@ -283,9 +340,12 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="Compare the corrected spectra with GFS's point spectra")
-    ap.add_argument("--models", nargs="+", metavar="NAME", help=f"subset of {list(MODEL_VARIANTS)}")
+    ap.add_argument("--eval", choices=list(EVALUATIONS), default="alternating",
+                    help="alternating: unseen station and months (default); alternating-epl3: the same, tested "
+                         "on EPL3 only; station-bias: all stations train, the last autumn is the test set")
+    ap.add_argument("--models", nargs="+", metavar="NAME", help="subset of the evaluation's model variants")
     args = ap.parse_args()
-    unknown = set(args.models or []) - set(MODEL_VARIANTS)
+    unknown = set(args.models or []) - set(EVALUATIONS[args.eval])
     if unknown:
-        ap.error(f"unknown models {sorted(unknown)}; choose from {list(MODEL_VARIANTS)}")
-    run(args.models)
+        ap.error(f"unknown models {sorted(unknown)}; choose from {list(EVALUATIONS[args.eval])}")
+    run(args.models, args.eval)

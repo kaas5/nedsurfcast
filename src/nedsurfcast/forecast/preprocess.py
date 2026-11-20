@@ -522,6 +522,24 @@ def _spectra_from_parts(p: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, np.nd
     return e, d
 
 
+def _hs_from_parts(p: np.ndarray) -> np.ndarray:
+    """(rows, 4, 3) GFS partitions -> sqrt(sum hs^2) of the present partitions: the Hs the rebuilt spectrum
+    has over ALL frequencies (NaN where no partition is present). Diagnostic: HTSGW / this is ~1, so GFS's
+    total wave height is the sum of its partitions (train_spectrum scales to HTSGW over the buoy's range)."""
+    hs = p[:, :, 0]
+    present = np.isfinite(p[:, :, :2]).all(-1) & (np.nan_to_num(hs) > 0)
+    out = np.sqrt((np.where(present, hs, 0.0) ** 2).sum(1))
+    out[~present.any(1)] = np.nan
+    return out
+
+
+def _bulk_vars(dims: tuple, htsgw: np.ndarray, hs_parts: np.ndarray) -> dict:
+    return {"htsgw": (dims, htsgw.astype(np.float32), {"units": "m", "long_name": "GFS HTSGW at the same cell"}),
+            "hs_partitions": (dims, hs_parts.astype(np.float32),
+                              {"units": "m", "long_name": "sqrt(sum hs^2) of the partitions (Hs of the rebuilt "
+                                                          "spectrum over all frequencies)"})}
+
+
 def rebuild_gfs_station_spectra() -> xr.Dataset:
     """GFS spectrum rebuilt from the partitions at each station's nearest cell (same shape as the group
     "spectra"), for EVERY run, lead time and station, also where no buoy spectrum exists. Used for the
@@ -534,14 +552,19 @@ def rebuild_gfs_station_spectra() -> xr.Dataset:
     shape = (grid.sizes["time"], grid.sizes["lead_hours"], len(names), len(f))
     energy = np.full(shape, np.nan, dtype=np.float32)
     direction = np.full(shape, np.nan, dtype=np.float32)
+    htsgw, hs_parts = np.full(shape[:3], np.nan), np.full(shape[:3], np.nan)
     for k, st in enumerate(names):
         cell = grid.sel(lat=float(stations["nearest_lat"].sel(station=st)),
                         lon=float(stations["nearest_lon"].sel(station=st))).load()
-        e, d = _spectra_from_parts(_cell_parts(cell).reshape(-1, 4, 3), f)
+        p = _cell_parts(cell).reshape(-1, 4, 3)
+        e, d = _spectra_from_parts(p, f)
         energy[:, :, k] = e.reshape(shape[0], shape[1], -1)
         direction[:, :, k] = d.reshape(shape[0], shape[1], -1)
+        htsgw[:, :, k] = cell["HTSGW"].transpose("time", "lead_hours").values
+        hs_parts[:, :, k] = _hs_from_parts(p).reshape(shape[0], shape[1])
     return xr.Dataset(
-        {"energy": (("time", "lead_hours", "station", "freq"), energy, {"units": "m2/Hz"}),
+        {**_bulk_vars(("time", "lead_hours", "station"), htsgw, hs_parts),
+         "energy": (("time", "lead_hours", "station", "freq"), energy, {"units": "m2/Hz"}),
          "direction": (("time", "lead_hours", "station", "freq"), direction,
                        {"units": "degree", "long_name": "mean direction per bin, coming from"})},
         coords={"time": grid["time"].values, "lead_hours": grid["lead_hours"].values, "station": names, "freq": f},
@@ -560,14 +583,15 @@ def rebuild_gfs_nowcast() -> xr.Dataset:
     names = list(stations.station.values)
     lats = xr.DataArray(stations["nearest_lat"].values, dims="station")
     lons = xr.DataArray(stations["nearest_lon"].values, dims="station")
-    fields = ["WVHGT", "WVPER", "WVDIR", "SWELL", "SWPER", "SWDIR"]
+    fields = ["WVHGT", "WVPER", "WVDIR", "SWELL", "SWPER", "SWDIR", "HTSGW"]
     leads = fcfg.GFSWAVE_NOWCAST_LEAD_HOURS
 
     def collect(ds):            # (time, lead_hours, ...) -> valid times and partitions (rows, station, 4, 3)
         pts = ds[fields].sel(lead_hours=leads).sel(lat=lats, lon=lons).load()
         valid = (pts["time"].values[:, None] + pts["lead_hours"].values[None, :].astype("timedelta64[h]")).ravel()
         p = _cell_parts(pts.transpose("time", "lead_hours", "station", ...))
-        return valid, p.reshape(-1, len(names), 4, 3)
+        hts = pts["HTSGW"].transpose("time", "lead_hours", "station").values
+        return valid, p.reshape(-1, len(names), 4, 3), hts.reshape(-1, len(names))
 
     pieces = [collect(grid)]
     start, end = pd.Timestamp(cfg.START_DATE), pd.Timestamp(cfg.END_DATE)
@@ -580,15 +604,18 @@ def rebuild_gfs_nowcast() -> xr.Dataset:
         with xr.open_dataset(fl) as ds:
             ds = ds.rename({k: v for k, v in fcfg.GFSWAVE_VAR_NAMES.items() if k in ds.data_vars})
             pieces.append(collect(ds.expand_dims("time")))
-    valid = np.concatenate([v for v, _ in pieces])
-    parts = np.concatenate([p for _, p in pieces])
+    valid = np.concatenate([v for v, _, _ in pieces])
+    parts = np.concatenate([p for _, p, _ in pieces])
+    hts = np.concatenate([h for _, _, h in pieces])
     valid, first = np.unique(valid, return_index=True)          # sorted; the runs do not overlap
     e, d = _spectra_from_parts(parts[first].reshape(-1, 4, 3), f)
+    hs_parts = _hs_from_parts(parts[first].reshape(-1, 4, 3)).reshape(len(valid), len(names))
     shape = (len(valid), len(names), len(f))
     print(f"  nowcast: {len(files)} extra runs, {len(valid)} valid times, "
           f"{np.isfinite(e).all(1).mean():.1%} of (valid time, station) present")
     return xr.Dataset(
-        {"energy": (("valid_time", "station", "freq"), e.reshape(shape).astype(np.float32), {"units": "m2/Hz"}),
+        {**_bulk_vars(("valid_time", "station"), hts[first], hs_parts),
+         "energy": (("valid_time", "station", "freq"), e.reshape(shape).astype(np.float32), {"units": "m2/Hz"}),
          "direction": (("valid_time", "station", "freq"), d.reshape(shape).astype(np.float32),
                        {"units": "degree", "long_name": "mean direction per bin, coming from"})},
         coords={"valid_time": valid, "station": names, "freq": f},
