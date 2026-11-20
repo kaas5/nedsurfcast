@@ -30,14 +30,18 @@ Zarr groups (one store, fcfg.PARTITION_ZARR):
                                      also without a buoy spectrum (history features of the spectrum model)
     gfs_nowcast    (valid_time, station, freq)   rebuilt spectrum of the latest GFS state (f000/f003 of the
                                      00/06/12/18z runs): history features before the issue time
+    station_location (station, [direction])   depth at the buoy and per coming-from direction the over-water
+                                     distance to land (EMODnet DTM and GFS's 0.25 deg coastline) and the mean
+                                     depth along the ray: location and fetch features (forecast/load_data.py)
 
 `time` is the issue time; valid_time = time + lead_hours. Samples and misses index the other
-groups with time_idx, lead_idx and station. Residuals are not stored: compute them in the model
-code (e.g. log Hs ratio, wrapped direction difference) from the gfs_* and buoy_* values.
+groups with time_idx, lead_idx and station. Model inputs and targets are not stored: forecast/load_data.py
+builds them from these groups.
 
-Run from anywhere with: python -m nedsurfcast.forecast.preprocess
+Run from anywhere with: python -m nedsurfcast.forecast.preprocess [--station-spectra | --rebuilt-spectra | --location]
 """
 
+import io
 import json
 import shutil
 
@@ -55,6 +59,19 @@ from nedsurfcast.forecast import config as fcfg
 
 GRID_STEP = 0.25            # deg, GFS global.0p25
 HS_SMALL = 0.3              # m; only used to split the report into small and large systems
+# Station location (section 7): EMODnet DTM, resampled, and rays from every station in every direction
+WCS_URL = "https://ows.emodnet-bathymetry.eu/wcs"
+COVERAGE = "emodnet__mean"           # EMODnet DTM: negative = below sea level, positive = land elevation
+BOX = dict(lat=(49.0, 61.0), lon=(-5.0, 12.0))   # deg; covers the North Sea and its coasts
+RESOLUTION = 0.01                    # deg (~1 km); the DTM itself is ~115 m
+TILE_DEG = 1.0                       # deg; BOX must be a whole number of tiles
+BATHYMETRY_FILE = cfg.RAW_DIR / "emodnet" / "bathymetry_north_sea.nc"
+N_DIRECTIONS = 360                   # 1 deg
+RAY_STEP_KM = 0.5                    # finer than the grid, so narrow dunes/islands are not stepped over
+RAY_MAX_KM = 500.0                   # longer rays (or leaving BOX) count as open sea
+RAY_DEPTH_KM = 50.0                  # mean depth over the first part of the ray
+MIN_DEPTH = 1.0                      # m; floor for depths (buoys near the surf zone, DTM noise)
+KM_PER_DEG = 111.195
 CFGRIB_NAMES = {"WVHGT": "shww", "WVPER": "mpww", "WVDIR": "wvdir", "SWELL": "shts", "SWPER": "mpts",
                 "SWDIR": "swdir", "HTSGW": "swh", "PERPW": "perpw", "DIRPW": "dirpw", "UGRD": "u", "VGRD": "v"}
 
@@ -522,24 +539,6 @@ def _spectra_from_parts(p: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, np.nd
     return e, d
 
 
-def _hs_from_parts(p: np.ndarray) -> np.ndarray:
-    """(rows, 4, 3) GFS partitions -> sqrt(sum hs^2) of the present partitions: the Hs the rebuilt spectrum
-    has over ALL frequencies (NaN where no partition is present). Diagnostic: HTSGW / this is ~1, so GFS's
-    total wave height is the sum of its partitions (train_spectrum scales to HTSGW over the buoy's range)."""
-    hs = p[:, :, 0]
-    present = np.isfinite(p[:, :, :2]).all(-1) & (np.nan_to_num(hs) > 0)
-    out = np.sqrt((np.where(present, hs, 0.0) ** 2).sum(1))
-    out[~present.any(1)] = np.nan
-    return out
-
-
-def _bulk_vars(dims: tuple, htsgw: np.ndarray, hs_parts: np.ndarray) -> dict:
-    return {"htsgw": (dims, htsgw.astype(np.float32), {"units": "m", "long_name": "GFS HTSGW at the same cell"}),
-            "hs_partitions": (dims, hs_parts.astype(np.float32),
-                              {"units": "m", "long_name": "sqrt(sum hs^2) of the partitions (Hs of the rebuilt "
-                                                          "spectrum over all frequencies)"})}
-
-
 def rebuild_gfs_station_spectra() -> xr.Dataset:
     """GFS spectrum rebuilt from the partitions at each station's nearest cell (same shape as the group
     "spectra"), for EVERY run, lead time and station, also where no buoy spectrum exists. Used for the
@@ -552,19 +551,14 @@ def rebuild_gfs_station_spectra() -> xr.Dataset:
     shape = (grid.sizes["time"], grid.sizes["lead_hours"], len(names), len(f))
     energy = np.full(shape, np.nan, dtype=np.float32)
     direction = np.full(shape, np.nan, dtype=np.float32)
-    htsgw, hs_parts = np.full(shape[:3], np.nan), np.full(shape[:3], np.nan)
     for k, st in enumerate(names):
         cell = grid.sel(lat=float(stations["nearest_lat"].sel(station=st)),
                         lon=float(stations["nearest_lon"].sel(station=st))).load()
-        p = _cell_parts(cell).reshape(-1, 4, 3)
-        e, d = _spectra_from_parts(p, f)
+        e, d = _spectra_from_parts(_cell_parts(cell).reshape(-1, 4, 3), f)
         energy[:, :, k] = e.reshape(shape[0], shape[1], -1)
         direction[:, :, k] = d.reshape(shape[0], shape[1], -1)
-        htsgw[:, :, k] = cell["HTSGW"].transpose("time", "lead_hours").values
-        hs_parts[:, :, k] = _hs_from_parts(p).reshape(shape[0], shape[1])
     return xr.Dataset(
-        {**_bulk_vars(("time", "lead_hours", "station"), htsgw, hs_parts),
-         "energy": (("time", "lead_hours", "station", "freq"), energy, {"units": "m2/Hz"}),
+        {"energy": (("time", "lead_hours", "station", "freq"), energy, {"units": "m2/Hz"}),
          "direction": (("time", "lead_hours", "station", "freq"), direction,
                        {"units": "degree", "long_name": "mean direction per bin, coming from"})},
         coords={"time": grid["time"].values, "lead_hours": grid["lead_hours"].values, "station": names, "freq": f},
@@ -583,15 +577,14 @@ def rebuild_gfs_nowcast() -> xr.Dataset:
     names = list(stations.station.values)
     lats = xr.DataArray(stations["nearest_lat"].values, dims="station")
     lons = xr.DataArray(stations["nearest_lon"].values, dims="station")
-    fields = ["WVHGT", "WVPER", "WVDIR", "SWELL", "SWPER", "SWDIR", "HTSGW"]
+    fields = ["WVHGT", "WVPER", "WVDIR", "SWELL", "SWPER", "SWDIR"]
     leads = fcfg.GFSWAVE_NOWCAST_LEAD_HOURS
 
     def collect(ds):            # (time, lead_hours, ...) -> valid times and partitions (rows, station, 4, 3)
         pts = ds[fields].sel(lead_hours=leads).sel(lat=lats, lon=lons).load()
         valid = (pts["time"].values[:, None] + pts["lead_hours"].values[None, :].astype("timedelta64[h]")).ravel()
         p = _cell_parts(pts.transpose("time", "lead_hours", "station", ...))
-        hts = pts["HTSGW"].transpose("time", "lead_hours", "station").values
-        return valid, p.reshape(-1, len(names), 4, 3), hts.reshape(-1, len(names))
+        return valid, p.reshape(-1, len(names), 4, 3)
 
     pieces = [collect(grid)]
     start, end = pd.Timestamp(cfg.START_DATE), pd.Timestamp(cfg.END_DATE)
@@ -604,23 +597,135 @@ def rebuild_gfs_nowcast() -> xr.Dataset:
         with xr.open_dataset(fl) as ds:
             ds = ds.rename({k: v for k, v in fcfg.GFSWAVE_VAR_NAMES.items() if k in ds.data_vars})
             pieces.append(collect(ds.expand_dims("time")))
-    valid = np.concatenate([v for v, _, _ in pieces])
-    parts = np.concatenate([p for _, p, _ in pieces])
-    hts = np.concatenate([h for _, _, h in pieces])
+    valid = np.concatenate([v for v, _ in pieces])
+    parts = np.concatenate([p for _, p in pieces])
     valid, first = np.unique(valid, return_index=True)          # sorted; the runs do not overlap
     e, d = _spectra_from_parts(parts[first].reshape(-1, 4, 3), f)
-    hs_parts = _hs_from_parts(parts[first].reshape(-1, 4, 3)).reshape(len(valid), len(names))
     shape = (len(valid), len(names), len(f))
     print(f"  nowcast: {len(files)} extra runs, {len(valid)} valid times, "
           f"{np.isfinite(e).all(1).mean():.1%} of (valid time, station) present")
     return xr.Dataset(
-        {**_bulk_vars(("valid_time", "station"), hts[first], hs_parts),
-         "energy": (("valid_time", "station", "freq"), e.reshape(shape).astype(np.float32), {"units": "m2/Hz"}),
+        {"energy": (("valid_time", "station", "freq"), e.reshape(shape).astype(np.float32), {"units": "m2/Hz"}),
          "direction": (("valid_time", "station", "freq"), d.reshape(shape).astype(np.float32),
                        {"units": "degree", "long_name": "mean direction per bin, coming from"})},
         coords={"valid_time": valid, "station": names, "freq": f},
         attrs={"description": "GFS spectrum rebuilt from the latest run (f000/f003) at every valid time and station",
                "gfs_spectrum_shape": json.dumps(fcfg.GFS_SPECTRUM_SHAPE)})
+
+
+# ---------------------------------------------------------------------------
+# 7. STATION LOCATION: bathymetry and exposure per direction (feature tokens "location"/"fetch")
+# ---------------------------------------------------------------------------
+
+def download_bathymetry(overwrite: bool = False) -> xr.DataArray:
+    """EMODnet DTM resampled to RESOLUTION over BOX -> elevation (lat, lon) in m, negative below sea level."""
+    if BATHYMETRY_FILE.exists() and not overwrite:
+        return xr.open_dataarray(BATHYMETRY_FILE)
+    import requests
+    from PIL import Image
+
+    def tile(la0, la1, lo0, lo1):           # the WCS refuses large areas: fetch TILE_DEG tiles
+        n_la, n_lo = round((la1 - la0) / RESOLUTION), round((lo1 - lo0) / RESOLUTION)
+        params = [("service", "WCS"), ("version", "2.0.1"), ("request", "GetCoverage"), ("coverageId", COVERAGE),
+                  ("subset", f"Lat({la0},{la1})"), ("subset", f"Long({lo0},{lo1})"), ("format", "image/tiff"),
+                  ("scalesize", f"i({n_lo}),j({n_la})")]          # i = longitude, j = latitude
+        r = requests.get(WCS_URL, params=params, timeout=300)
+        r.raise_for_status()
+        if "tiff" not in r.headers.get("content-type", ""):
+            raise RuntimeError(f"EMODnet WCS returned {r.headers.get('content-type')}: {r.text[:500]}")
+        a = np.array(Image.open(io.BytesIO(r.content)), dtype=np.float32)     # row 0 = north
+        assert a.shape == (n_la, n_lo), a.shape
+        return a
+
+    (lat0, lat1), (lon0, lon1) = BOX["lat"], BOX["lon"]
+    n_lat, n_lon = round((lat1 - lat0) / RESOLUTION), round((lon1 - lon0) / RESOLUTION)
+    lat_edges, lon_edges = np.arange(lat0, lat1 + 1e-9, TILE_DEG), np.arange(lon0, lon1 + 1e-9, TILE_DEG)
+    rows = []
+    for la1, la0 in zip(lat_edges[::-1][:-1], lat_edges[::-1][1:]):           # north to south
+        rows.append(np.hstack([tile(la0, la1, lo0, lo1) for lo0, lo1 in zip(lon_edges[:-1], lon_edges[1:])]))
+    elev = np.vstack(rows)
+    assert elev.shape == (n_lat, n_lon), elev.shape
+    lat = lat1 - (np.arange(n_lat) + 0.5) * (lat1 - lat0) / n_lat
+    lon = lon0 + (np.arange(n_lon) + 0.5) * (lon1 - lon0) / n_lon
+    da = xr.DataArray(elev[::-1], coords={"lat": lat[::-1], "lon": lon}, dims=("lat", "lon"), name="elevation",
+                      attrs={"units": "m", "source": f"{WCS_URL} {COVERAGE}", "positive": "up"})
+    BATHYMETRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    da.to_netcdf(BATHYMETRY_FILE)
+    print(f"bathymetry: {da.shape} written to {BATHYMETRY_FILE}")
+    return da
+
+
+def _sample(elev: xr.DataArray, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+    """Nearest-cell elevation; NaN outside BOX."""
+    la, lo = elev["lat"].values, elev["lon"].values
+    i = np.round((lat - la[0]) / (la[1] - la[0])).astype(int)
+    j = np.round((lon - lo[0]) / (lo[1] - lo[0])).astype(int)
+    inside = (i >= 0) & (i < len(la)) & (j >= 0) & (j < len(lo))
+    out = np.full(lat.shape, np.nan)
+    out[inside] = elev.values[i[inside], j[inside]]
+    return out
+
+
+_S = np.arange(1, int(RAY_MAX_KM / RAY_STEP_KM) + 1) * RAY_STEP_KM          # km along a ray
+
+
+def _rays(elev: xr.DataArray, lat: float, lon: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Elevation along a ray in every direction (direction, step), the index of the first land step (len(_S)
+    if none) and the over-water distance to land (km, RAY_MAX_KM if none). Land = elevation >= 0; NaN
+    (outside the grid) is open sea."""
+    theta = np.deg2rad(np.arange(N_DIRECTIONS) * 360 / N_DIRECTIONS)
+    # flat-earth steps are accurate enough over a few hundred km at these latitudes
+    ray_lat = lat + np.outer(np.cos(theta), _S) / KM_PER_DEG
+    ray_lon = lon + np.outer(np.sin(theta), _S) / (KM_PER_DEG * np.cos(np.deg2rad(lat)))
+    e = _sample(elev, ray_lat, ray_lon)
+    land = e >= 0
+    first = np.where(land.any(1), land.argmax(1), len(_S))
+    dist = np.where(first < len(_S), _S[np.minimum(first, len(_S) - 1)], RAY_MAX_KM)
+    return e, first, dist
+
+
+def gfs_distance_to_land(lats, lons) -> np.ndarray:
+    """Over-water distance to land per direction (n, N_DIRECTIONS) as GFS sees it: rays from the given GFS
+    cells over the 0.25 deg GFS sea mask (an approximation of the coastline of GFS-Wave's model grids)."""
+    sea = load("grid")["sea_mask"].load()
+    elev = xr.where(sea, -1.0, 1.0)                     # same convention as the DTM: land >= 0
+    return np.array([_rays(elev, lat, lon)[2] for lat, lon in zip(lats, lons)])
+
+
+def location_table(lats, lons, elev: xr.DataArray) -> dict[str, np.ndarray]:
+    """Depth h0 (n,), distance to land D (n, N_DIRECTIONS) in km and mean ray depth h_ray (n, N_DIRECTIONS)."""
+    s = _S
+    h0, dist, h_ray = [], [], []
+    for lat, lon in zip(lats, lons):
+        e, first, d = _rays(elev, lat, lon)                                    # (direction, step)
+        dist.append(d)
+        near = (s[None, :] <= RAY_DEPTH_KM) & (np.arange(len(s))[None, :] < first[:, None])
+        depth = np.where(near & np.isfinite(e), np.maximum(-e, MIN_DEPTH), np.nan)
+        with np.errstate(invalid="ignore"):
+            h_ray.append(np.where(near.any(1), np.nanmean(depth, 1), MIN_DEPTH))
+        h0.append(max(-float(_sample(elev, np.array([lat]), np.array([lon]))[0]), MIN_DEPTH))
+    return {"depth": np.array(h0), "distance_to_land": np.array(dist), "ray_depth": np.array(h_ray)}
+
+
+def build_station_location() -> xr.Dataset:
+    """Location table at the buoy positions of the dataset's stations: depth, and per coming-from direction
+    the over-water distance to land (real coastline and GFS's 0.25 deg coastline) and the mean ray depth."""
+    stations = load("stations").load()
+    t = location_table(stations["lat"].values, stations["lon"].values, download_bathymetry())
+    gfs_dist = gfs_distance_to_land(stations["nearest_lat"].values, stations["nearest_lon"].values)
+    return xr.Dataset(
+        {"depth": ("station", t["depth"], {"units": "m"}),
+         "distance_to_land": (("station", "direction"), t["distance_to_land"],
+                              {"units": "km", "long_name": "over-water distance to land towards direction",
+                               "capped_at": RAY_MAX_KM}),
+         "gfs_distance_to_land": (("station", "direction"), gfs_dist,
+                                  {"units": "km", "long_name": "distance to land on the 0.25 deg GFS sea mask, "
+                                   "from the station's GFS cell", "capped_at": RAY_MAX_KM}),
+         "ray_depth": (("station", "direction"), t["ray_depth"],
+                       {"units": "m", "long_name": f"mean depth over the first {RAY_DEPTH_KM:g} km of the ray"})},
+        coords={"station": stations["station"].values, "direction": np.arange(N_DIRECTIONS) * 360 / N_DIRECTIONS},
+        attrs={"description": "station depth and per-direction exposure from the EMODnet DTM",
+               "direction": "deg, coming-from (the ray points towards where the waves come from)"})
 
 
 def _append_group(name: str, ds: xr.Dataset):
@@ -638,20 +743,36 @@ def append_gfs_rebuilt():
     _append_group("gfs_nowcast", rebuild_gfs_nowcast())
 
 
+def append_station_location():
+    """(Re)build the group station_location (location and fetch features of the spectrum model)."""
+    ds = build_station_location()
+    _append_group("station_location", ds)
+    d = ds["distance_to_land"]
+    print(pd.DataFrame({"depth (m)": ds["depth"].values, **{f"D from {n} (km)": d.sel(direction=a).values
+                        for n, a in (("N", 0), ("E", 90), ("SW", 225), ("W", 270), ("NW", 315))},
+                        "ray depth NW (m)": ds["ray_depth"].sel(direction=315).values},
+                       index=ds["station"].values).round(1).to_string())
+
+
 if __name__ == "__main__":
     import argparse
 
-    ap = argparse.ArgumentParser(description="Build the forecast dataset")
+    ap = argparse.ArgumentParser(description="Build the forecast dataset (all groups unless a flag is given)")
     ap.add_argument("--station-spectra", action="store_true",
                     help="only (re)build the gfs_station_spectra group in the existing dataset")
     ap.add_argument("--rebuilt-spectra", action="store_true",
                     help="only (re)build the gfs_rebuilt and gfs_nowcast groups in the existing dataset")
+    ap.add_argument("--location", action="store_true",
+                    help="only (re)build the station_location group in the existing dataset")
     args = ap.parse_args()
-    if not (args.station_spectra or args.rebuilt_spectra):
+    everything = not (args.station_spectra or args.rebuilt_spectra or args.location)
+    if everything:
         groups = build_partition_dataset()
         save(groups)
         report(groups["samples"], groups["misses"], groups["station_times"])
-    if not args.rebuilt_spectra:
+    if everything or args.station_spectra:
         append_gfs_station_spectra()
-    if not args.station_spectra:
+    if everything or args.rebuilt_spectra:
         append_gfs_rebuilt()
+    if everything or args.location:
+        append_station_location()

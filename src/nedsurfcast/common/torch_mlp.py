@@ -1,20 +1,19 @@
 """
-PyTorch MLP regressor with the interface and training behaviour of sklearn's MLPRegressor
-===========================================================================================
+PyTorch MLP regressor with a sklearn estimator interface
+==========================================================
 
-sklearn only runs on the CPU and its training loop is pure Python. This estimator trains the same network on
-the GPU (if available) and can be dropped into a sklearn Pipeline (fit / predict / get_params).
+Trains a fully connected ReLU network on the GPU (if available) and can be dropped into a sklearn Pipeline
+(fit / predict / get_params).
 
-Matches sklearn.neural_network.MLPRegressor (solver="adam", activation="relu", early_stopping=True):
+Training:
     loss            0.5 * mean squared error over samples and outputs
                     + 0.5 * alpha * sum(weights^2) / batch size   (L2 on weights, not on biases; applied as
                     Adam weight_decay = alpha / batch size, which gives the same gradient)
     optimiser       Adam (beta 0.9 / 0.999, eps 1e-8), constant learning rate
-    initialisation  Glorot uniform, sklearn's factor (6 for relu layers, 2 for the linear output layer)
+    initialisation  Glorot uniform (factor 6 for relu layers, 2 for the linear output layer)
     early stopping  a random validation_fraction of the training rows; stop when the validation R^2
                     (mean over outputs) has not improved by tol for n_iter_no_change epochs; the weights of
                     the best epoch are restored
-Not bit-identical to sklearn (different random streams), but the same model.
 """
 
 import numpy as np
@@ -50,7 +49,7 @@ class TorchMLPRegressor(RegressorMixin, BaseEstimator):
         layers = []
         for k, (a, b) in enumerate(zip(sizes[:-1], sizes[1:])):
             lin = torch.nn.Linear(a, b)
-            factor = 2.0 if k == len(sizes) - 2 else 6.0               # sklearn: 2 for the identity output
+            factor = 2.0 if k == len(sizes) - 2 else 6.0               # 2 for the identity output
             bound = np.sqrt(factor / (a + b))
             with torch.no_grad():
                 lin.weight.uniform_(-bound, bound, generator=gen)
@@ -111,7 +110,7 @@ class TorchMLPRegressor(RegressorMixin, BaseEstimator):
                 loss.backward()
                 opt.step()
                 total += loss.detach() * len(idx)
-            # data loss only (sklearn's loss_curve_ includes the L2 term)
+            # data loss only, without the L2 term
             self.loss_curve_.append(float(total) / len(X_tr))
             self.n_iter_ = epoch + 1
 

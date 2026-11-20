@@ -99,6 +99,50 @@ Meerdere models trainen, kijken hoe epistemic/aleatoric uncertainty zich verhoud
 
 
 
+Run experiments on the MLP with different values for l2 regularization. 
+The location features still need clipping because of MMND, as noted in the previous report.
+
+
+
+I want to refactor the code before I continue experimentation. I present a plan, give feedback on it:
+
+Split the code for dataprocessing into 2 files:
+ - preprocessing.py: this file contains all the functions that change the raw download data to up to the point where the data is written to disk as .zarr files. 
+ - load_data.py: this file contains all the functions that prepare the data in the processed .zarr files to be fed to the models.
+The training files should not contain functions that alter the data anymore.
+
+The files regarding model training/evaluation are spread out across 3 files. I renamed them to start with a _. These files should be squashed into 2. The training should have the following structure:
+The following models are trained on: 
+ - ridge regression (ridge)
+ - ridge regression with history from previous timesteps + location features + fetch correction (ridge-hlf)
+ - mlp (mlp)
+ - mlp with history from previous timesteps + location features + fetch correction (mlp-hlf)
+One file should measure performance by the skill between the model output and the raw GFS spectra that are available for K113 and EPL3
+A table with the following skill percentages should be printed out at the end of the training run for each model: sqrt(E) | direction | Hm0 | Hm0 T<6 s | Hm0 6-10 s | Hm0 T>10 s
+Another file should use each station as a test station. Two folds per station group (even and odd months), each leaving out the group and its test months. Use a normalised error between the model prediction and the actual measurement, for example Hm0 NRMSE = RMSE of Hm0 / RMS of the measured Hm0. structure the output in the same way as the first training script: squaredroot E, Direction, Hm0, Hm < 6 s, 6 s =< Hm <= 10 s, Hm > 10 s.1, averaged over all folds for every model per row. Also, save a .csv with the same columns for every model for every test fold that holdouts 1 station group, because it gives information about potential problems at individual stations.
+
+Remove the scaling by HTSGW of the spectra from the data loader, it adds too much complexity with little reward. 
+Remove all references that directly link data to a specific station name/id during training if that is not the case. 
+Move the models used during training to a separate file called models.py and refer to these models in the files that train them.
+Remove all references to MLPRegressor in the code. The pytorch version replaces it.
+
+
+Yes, use the normalised error instead to determine the score against measurements. Average the scores over all folds by pooling the rows. Yes, add a separate scoring.py file. Change the preprocess.py and load_data.py as suggested. Remove the station names as suggested. Change column names as suggested. Save the per-fold .csv per station, not per group. Keep bootstrap intervals on the skill and the per-lead-time table. Remove the scaling from the code, but do not rebuild the dataset for now, I can do that later. Agreed to everything regarding the small points. 
+
+Carry out the refactor.
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

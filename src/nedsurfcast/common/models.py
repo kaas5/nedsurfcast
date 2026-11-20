@@ -29,14 +29,3 @@ MODELS = {
         random_state=0,  # early stopping uses a random validation split above 10k rows
     ),
 }
-
-CLASSIFIERS = {
-    # Base rate only: the climatological probability. Any real classifier must beat this.
-    "prior": lambda: DummyClassifier(strategy="prior"),
-    "logistic": lambda: make_pipeline(SimpleImputer(strategy="median"), StandardScaler(),
-                                      LogisticRegression(C=1.0, max_iter=1000)),
-    "hist-gbc": lambda: HistGradientBoostingClassifier(
-        max_depth=3, learning_rate=0.05, max_iter=200, min_samples_leaf=50, l2_regularization=1.0,
-        random_state=0,  # early stopping uses a random validation split above 10k rows
-    ),
-}

@@ -98,5 +98,5 @@ MATCH_KWARGS = dict(                          # common.partition.match_partition
 )
 PARTITION_ZARR = FORECAST_DIR / "gfswave_partitions.zarr"
 
-""" Spectrum correction model (forecast/train_spectrum.py): out-of-sample predictions and scores """
+""" Spectrum correction model (forecast/train_vs_gfs_point.py, forecast/train_vs_buoys.py): score tables """
 SPECTRUM_MODEL_DIR = FORECAST_DIR / "spectrum_model"
