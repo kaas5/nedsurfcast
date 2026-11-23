@@ -31,6 +31,7 @@ The station name is only used to look up the station's row in the location table
 import numpy as np
 import pandas as pd
 
+from nedsurfcast.forecast import config as fcfg
 from nedsurfcast.forecast.preprocess import load
 
 EPS = 1e-3                      # m2/Hz added before logs and in the direction weights
@@ -45,12 +46,14 @@ FULLY_DEVELOPED = 2.3e4         # dimensionless fetch g X / U^2 beyond which win
 # ---------------------------------------------------------------------------
 
 def load_data() -> dict:
-    """Every (run, lead, station) with a buoy spectrum -> arrays (n, n_freq) and a meta table (n rows)."""
+    """Every (run, lead, station) with a buoy spectrum -> arrays (n, n_freq) and a meta table (n rows).
+    Only the stations in fcfg.RWS_SPECTRA_STATIONS (the zarr may hold stations that were dropped later)."""
     spec = load("spectra").load()
     st = load("station_times").load()
     stations = load("stations").load()
 
-    it, il, ist = np.nonzero(st["has_buoy"].values)               # (time, lead, station)
+    use = np.isin(spec["station"].values, fcfg.RWS_SPECTRA_STATIONS)
+    it, il, ist = np.nonzero(st["has_buoy"].values & use)         # (time, lead, station)
     take = lambda a: a[it, il, ist]
     data = {v: take(spec[v].values).astype(float)
             for v in ("buoy_energy", "buoy_direction", "gfs_energy", "gfs_direction")}

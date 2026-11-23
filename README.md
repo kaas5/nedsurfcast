@@ -5,6 +5,7 @@ The following models are trained on:
  - ridge regression with history from previous timesteps + location features + fetch correction (ridge-hlf)
  - mlp (mlp)
  - mlp with history from previous timesteps + location features + fetch correction (mlp-hlf)
+ 
 One file should measure performance by the skill between the model output and the raw GFS spectra that are available for K113 and EPL3
 A table with the following skill percentages should be printed out at the end of the training run for each model: sqrt(E) | direction | Hm0 | Hm0 T<6 s | Hm0 6-10 s | Hm0 T>10 s.
 

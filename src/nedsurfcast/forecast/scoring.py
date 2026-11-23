@@ -8,6 +8,7 @@ those blocks and TEST_GAP_HOURS around them (forecasts up to 72 h of neighbourin
 a day against autocorrelation). Alternating blocks keep every season in training.
     point_station_folds   the stations with a GFS point spectrum: station k tests blocks k, k + n, ...
     station_group_folds   every station group twice: on the even and on the odd blocks
+fcfg.TRAIN_ONLY_STATIONS train in every fold (outside its held-out blocks) but are never tested or scored.
 
 Metrics, per spectrum compared with the measured (averaged buoy) spectrum, columns METRICS:
     sqrt(E)       amplitude per bin, sqrt(E) - sqrt(E_buoy): the energy part of the training target
@@ -74,15 +75,19 @@ def point_station_folds(data: dict) -> list[tuple[str, np.ndarray, np.ndarray]]:
 
 
 def station_group_folds(data: dict) -> list[tuple[str, np.ndarray, np.ndarray]]:
-    """Two folds per station group (even and odd blocks), each holding out the group and its test blocks."""
+    """Two folds per station group (even and odd blocks), each holding out the group and its test blocks.
+    fcfg.TRAIN_ONLY_STATIONS are never tested (no fold of their own, left out of the test rows) but train in
+    every fold that does not hold out their group."""
     m = data["meta"]
     station, groups = m["station"].to_numpy(), m["buoy_group"].to_numpy()
+    testable = ~np.isin(station, fcfg.TRAIN_ONLY_STATIONS)
     blocks = [test_block(m, k, 2)[:2] for k in range(2)]
     folds = []
-    for g in np.unique(groups):
-        names = "/".join(sorted(np.unique(station[groups == g])))
+    for g in np.unique(groups[testable]):
+        names = "/".join(sorted(np.unique(station[(groups == g) & testable])))
         for k, (in_block, near_block) in enumerate(blocks):
-            folds.append((f"{names} {('even', 'odd')[k]} months", (groups != g) & ~near_block, (groups == g) & in_block))
+            folds.append((f"{names} {('even', 'odd')[k]} months", (groups != g) & ~near_block,
+                          (groups == g) & testable & in_block))
     return folds
 
 

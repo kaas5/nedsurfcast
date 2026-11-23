@@ -69,9 +69,13 @@ RWS_SPECTRA_STATIONS = [                      # open sea and open coast; estuari
     "HKNWN", "HKNWZ",                         # Hollandse Kust Noord wind farm
     "HKWWN", "HKWWZ",                         # Hollandse Kust West wind farm
     "IJG1",                                   # IJgeul IJ11 buoy
-    "MMND",                                   # Maasmond
+    "MMND",                                   # Maasmond (training only, see TRAIN_ONLY_STATIONS)
     "SGAT",                                   # Schulpengat
 ]
+# Stations used for training but never as test station (no test fold, not scored): MMND is sheltered by the
+# harbour dams (land within 5 km in ~half of the directions), far outside the open coast the scores are meant
+# for. In training it covers the sheltered end of the location features (without it SGAT extrapolates).
+TRAIN_ONLY_STATIONS = ["MMND"]
 RWS_SPECTRA_DIR = cfg.RAW_DIR / "rws_spectra"
 
 # Buoy spectrum partitioning (common/partition.py), tuned with forecast/check_partitions.py

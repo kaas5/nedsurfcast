@@ -10,10 +10,18 @@ Training:
                     + 0.5 * alpha * sum(weights^2) / batch size   (L2 on weights, not on biases; applied as
                     Adam weight_decay = alpha / batch size, which gives the same gradient)
     optimiser       Adam (beta 0.9 / 0.999, eps 1e-8), constant learning rate
+    dropout         dropout probability after every hidden ReLU layer (0 = none; off in predict)
     initialisation  Glorot uniform (factor 6 for relu layers, 2 for the linear output layer)
-    early stopping  a random validation_fraction of the training rows; stop when the validation R^2
-                    (mean over outputs) has not improved by tol for n_iter_no_change epochs; the weights of
-                    the best epoch are restored
+    early stopping  stop when the validation R^2 (mean over outputs) has not improved by tol for
+                    n_iter_no_change epochs; the weights of the best epoch are restored. Validation rows:
+                      fit(X, y)                  a random validation_fraction of the rows
+                      fit(X, y, groups=times)    with validation_blocks set: time blocks. The unique values of
+                                                 `groups` (e.g. issue times) are split in n_time_blocks
+                                                 contiguous blocks; validation_blocks of them, spread evenly,
+                                                 validate, and rows within validation_gap of them (same unit
+                                                 as groups, e.g. np.timedelta64) are left out of training.
+                                                 Random rows share days with the training rows and keep
+                                                 improving while the model overfits to those days.
 """
 
 import numpy as np
@@ -24,7 +32,12 @@ from sklearn.base import BaseEstimator, RegressorMixin
 class TorchMLPRegressor(RegressorMixin, BaseEstimator):
     def __init__(self, hidden_layer_sizes=(128, 64), alpha=1e-3, learning_rate_init=1e-3, batch_size=256,
                  max_iter=40, early_stopping=True, validation_fraction=0.1, n_iter_no_change=5, tol=1e-4,
+                 validation_blocks=None, n_time_blocks=20, validation_gap=None, dropout=0.0,
                  random_state=0, device=None, verbose=False):
+        self.dropout = dropout
+        self.validation_blocks = validation_blocks
+        self.n_time_blocks = n_time_blocks
+        self.validation_gap = validation_gap
         self.hidden_layer_sizes = hidden_layer_sizes
         self.alpha = alpha
         self.learning_rate_init = learning_rate_init
@@ -57,19 +70,34 @@ class TorchMLPRegressor(RegressorMixin, BaseEstimator):
             layers.append(lin)
             if k < len(sizes) - 2:
                 layers.append(torch.nn.ReLU())
+                if self.dropout:
+                    layers.append(torch.nn.Dropout(self.dropout))
         return torch.nn.Sequential(*layers)
 
     @staticmethod
     def _r2(pred: torch.Tensor, y: torch.Tensor) -> float:
-        """sklearn's r2_score with multioutput="uniform_average" (constant outputs count as 1)."""
+        """R^2 averaged over outputs (constant outputs count as 1)."""
         ss_res = ((y - pred) ** 2).sum(0)
         ss_tot = ((y - y.mean(0)) ** 2).sum(0)
         r2 = torch.where(ss_tot > 0, 1 - ss_res / ss_tot.clamp_min(1e-30),
                          torch.where(ss_res > 0, torch.zeros_like(ss_res), torch.ones_like(ss_res)))
         return float(r2.mean())
 
+    def _time_split(self, groups) -> tuple[np.ndarray, np.ndarray]:
+        """(validation, training) row indices from time blocks of `groups` (see the module docstring)."""
+        g = np.asarray(groups)
+        blocks = np.array_split(np.unique(g), self.n_time_blocks)
+        picks = np.linspace(0, len(blocks) - 1, self.validation_blocks + 2)[1:-1].round().astype(int)
+        val, near = np.zeros(len(g), bool), np.zeros(len(g), bool)
+        for k in picks:
+            lo, hi = blocks[k][0], blocks[k][-1]
+            val |= (g >= lo) & (g <= hi)
+            gap = self.validation_gap if self.validation_gap is not None else 0 * (hi - lo)
+            near |= (g >= lo - gap) & (g <= hi + gap)
+        return np.flatnonzero(val), np.flatnonzero(~near)
+
     # -----------------------------------------------------------------------
-    def fit(self, X, y):
+    def fit(self, X, y, groups=None):
         dev = self._device()
         X = torch.as_tensor(np.asarray(X, dtype=np.float32), device=dev)
         y = np.asarray(y, dtype=np.float32)
@@ -79,7 +107,10 @@ class TorchMLPRegressor(RegressorMixin, BaseEstimator):
         gen_cpu = torch.Generator().manual_seed(self.random_state)
 
         n = len(X)
-        if self.early_stopping:
+        if self.early_stopping and self.validation_blocks and groups is not None:
+            val_idx, tr_idx = (torch.as_tensor(i, device=dev) for i in self._time_split(groups))
+            X_val, y_val, X_tr, y_tr = X[val_idx], y[val_idx], X[tr_idx], y[tr_idx]
+        elif self.early_stopping:
             perm = torch.randperm(n, generator=gen_cpu)
             n_val = max(1, int(round(self.validation_fraction * n)))
             val_idx, tr_idx = perm[:n_val].to(dev), perm[n_val:].to(dev)
