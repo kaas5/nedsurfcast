@@ -104,3 +104,14 @@ PARTITION_ZARR = FORECAST_DIR / "gfswave_partitions.zarr"
 
 """ Spectrum correction model (forecast/train_vs_gfs_point.py, forecast/train_vs_buoys.py): score tables """
 SPECTRUM_MODEL_DIR = FORECAST_DIR / "spectrum_model"
+# trained PyTorch models of the spectrum correction (forecast/train_final.py, forecast/checkpoints.py):
+# <model name>_<YYYYmmdd-HHMMSS>.pt, ensemble members <model name>_<YYYYmmdd-HHMMSS>_<n>.pt (n = 1, 2, ...)
+CHECKPOINT_DIR = cfg.ROOT / "checkpoints"
+
+""" Live forecasts (download/gfs.py --live, forecast/predict.py) """
+# the newest 00z run, the previous day's 00z run (f000-f021: nowcast at 00/03z and history fallback) and the
+# previous day's 06/12/18z nowcasts (GFSWAVE_NOWCAST_LEAD_HOURS) in GFSWAVE_LIVE_DIR/nowcast; same file
+# format as the archive, separate folder
+GFSWAVE_LIVE_DIR = cfg.RAW_DIR / "gfswave_live"
+FORECAST_MODEL = "cnn-hlf"                    # name in forecast/models.MODELS, loaded from CHECKPOINT_DIR
+FORECAST_OUTPUT_DIR = FORECAST_DIR / "forecasts"   # forecast_YYYYMMDD_HHz.json + forecast_latest.json

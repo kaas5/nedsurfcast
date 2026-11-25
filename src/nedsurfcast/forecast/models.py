@@ -12,7 +12,7 @@ one feature set. MODELS maps a short name to (estimator factory, feature set):
     mlp-hlf     the same + history per period band + location + fetch mismatch
     cnn         1D CNN over the frequency bins (common/torch_cnn.py): per bin the GFS spectrum variables, the
                 bin frequency and the bulk context as channels; stacked convolutions widen the window
-                (SpectrumCNN)
+                (SpectrumCNN); an ensemble of N_SEEDS networks with different seeds, averaged
     cnn-hlf     the same + history per period band + location + fetch mismatch (as extra bulk channels)
 
 One joint network, not one per block: separate networks were worse on energy (the direction outputs help the
@@ -130,22 +130,24 @@ MODELS = {
     "ridge-hlf": (ridge, FULL),
     "mlp": (mlp, "gfs"),
     "mlp-hlf": (mlp, FULL),
-    "cnn": (cnn, "gfs"),
-    "cnn-hlf": (cnn, FULL),
+    "cnn": (cnn_ensemble, "gfs"),
+    "cnn-hlf": (cnn_ensemble, FULL),
 }
 
 
-def fit_predict(make, X_train, Y_train, X_test, times_train=None, freq=None) -> np.ndarray:
-    """Fit a fresh estimator and predict, clipped to the range of the training targets (no extrapolation).
-    times_train (issue times of the training rows) goes to estimators that validate on time blocks, freq (bin
-    frequencies) to the CNN."""
-    model = make()
+def fit_model(model, X_train, Y_train, times_train=None, freq=None):
+    """Fit an estimator from MODELS. times_train (issue times of the training rows) goes to estimators that
+    validate on time blocks, freq (bin frequencies) to the CNN."""
     if isinstance(model, SpectrumCNN):
-        model.fit(X_train, Y_train, groups=times_train, freq=freq)
-    elif isinstance(model, EnergyDirectionMLP):
-        model.fit(X_train, Y_train, groups=times_train)
-    else:
-        model.fit(X_train, Y_train)
+        return model.fit(X_train, Y_train, groups=times_train, freq=freq)
+    if isinstance(model, EnergyDirectionMLP):
+        return model.fit(X_train, Y_train, groups=times_train)
+    return model.fit(X_train, Y_train)
+
+
+def fit_predict(make, X_train, Y_train, X_test, times_train=None, freq=None) -> np.ndarray:
+    """Fit a fresh estimator and predict, clipped to the range of the training targets (no extrapolation)."""
+    model = fit_model(make(), X_train, Y_train, times_train, freq)
     return np.clip(model.predict(X_test), Y_train.min(0), Y_train.max(0))
 
 

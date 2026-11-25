@@ -6,6 +6,7 @@ Run from anywhere with:
     python -m nedsurfcast.download.gfs              gridded fields (fcfg.GFSWAVE_FIELDS)
     python -m nedsurfcast.download.gfs --spectra    point spectra at fcfg.GFSWAVE_SPEC_STATIONS
     python -m nedsurfcast.download.gfs --nowcast    analyses (f000/f003) of the 06/12/18z runs
+    python -m nedsurfcast.download.gfs --live [--issue YYYYMMDDHH]   inputs of a live forecast (forecast/predict.py)
 """
 
 import datetime as dt
@@ -263,6 +264,59 @@ def download_gfswave_nowcast(overwrite: bool = False, max_workers: int = 4):
                   _issue_times(fcfg.GFSWAVE_NOWCAST_CYCLES), max_workers)
 
 
+# ---------------------------------------------------------------------------
+# LIVE DATA (forecast/predict.py)
+# ---------------------------------------------------------------------------
+
+LIVE_PREVIOUS_LEADS = list(range(0, 24, 3))   # previous day's run: nowcast at 00/03z, history fallback
+
+
+def run_complete(issue: dt.datetime, lead: int = None) -> bool:
+    """Whether the run is published up to `lead` (default the last of fcfg.GFSWAVE_LEAD_HOURS)."""
+    lead = max(fcfg.GFSWAVE_LEAD_HOURS) if lead is None else lead
+    with _session() as session:
+        return session.head(_gfswave_url(issue, lead) + ".idx", timeout=60).status_code == 200
+
+
+def latest_issue(cycle: int = None, days_back: int = 3) -> dt.datetime:
+    """The newest complete run at `cycle` (default fcfg.GFSWAVE_CYCLES[0], i.e. 00z) of the last days."""
+    cycle = fcfg.GFSWAVE_CYCLES[0] if cycle is None else cycle
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    today = now.replace(hour=cycle, minute=0, second=0, microsecond=0)
+    for back in range(days_back + 1):
+        issue = today - dt.timedelta(days=back)
+        if issue <= now and run_complete(issue):
+            return issue
+    raise RuntimeError(f"no complete {cycle:02d}z run in the last {days_back} days")
+
+
+def _has_leads(filename, leads) -> bool:
+    if not filename.exists():
+        return False
+    with xr.open_dataset(filename) as ds:
+        return set(leads) <= set(int(h) for h in ds["lead_hours"].values)
+
+
+def download_live(issue: dt.datetime = None, overwrite: bool = False) -> dt.datetime:
+    """Everything a live forecast from run `issue` (default: the newest complete 00z run) needs, into
+    fcfg.GFSWAVE_LIVE_DIR: the run itself, the previous day's run (LIVE_PREVIOUS_LEADS) and the previous day's
+    nowcasts (fcfg.GFSWAVE_NOWCAST_CYCLES, fcfg.GFSWAVE_NOWCAST_LEAD_HOURS) in GFSWAVE_LIVE_DIR/nowcast.
+    Files that already hold the needed lead times are kept. Returns the issue time."""
+    issue = latest_issue() if issue is None else issue
+    previous = issue - dt.timedelta(days=1)
+    live, nowcast = fcfg.GFSWAVE_LIVE_DIR, fcfg.GFSWAVE_LIVE_DIR / "nowcast"
+    nowcast.mkdir(parents=True, exist_ok=True)
+    jobs = [(issue, fcfg.GFSWAVE_LEAD_HOURS, live), (previous, LIVE_PREVIOUS_LEADS, live)]
+    jobs += [(previous.replace(hour=h), fcfg.GFSWAVE_NOWCAST_LEAD_HOURS, nowcast) for h in fcfg.GFSWAVE_NOWCAST_CYCLES]
+    for run, leads, out_dir in jobs:
+        filename = out_dir / f"gfswave_{run:%Y%m%d}_{run:%H}z.nc"
+        if not overwrite and _has_leads(filename, leads):
+            print(f"{filename.name}: already there")
+            continue
+        download_gfswave_cycle(run, overwrite=True, leads=leads, out_dir=out_dir)
+    return issue
+
+
 def download_gfswave_spectra(overwrite: bool = False, max_workers: int = 4):
     """Point spectra of every run from cfg.START_DATE to cfg.END_DATE at fcfg.GFSWAVE_SPEC_STATIONS."""
     fcfg.GFSWAVE_SPEC_DIR.mkdir(parents=True, exist_ok=True)
@@ -275,8 +329,12 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser(description="Download archived GFS-Wave forecasts")
     ap.add_argument("--spectra", action="store_true", help="download the point spectra instead of the gridded fields")
     ap.add_argument("--nowcast", action="store_true", help="download the nowcast fields (06/12/18z f000/f003)")
+    ap.add_argument("--live", action="store_true", help="download what a live forecast needs (newest 00z run)")
+    ap.add_argument("--issue", help="with --live: issue time YYYYMMDDHH instead of the newest run")
     args = ap.parse_args()
-    if args.spectra:
+    if args.live:
+        download_live(dt.datetime.strptime(args.issue, "%Y%m%d%H") if args.issue else None)
+    elif args.spectra:
         download_gfswave_spectra()
     elif args.nowcast:
         download_gfswave_nowcast()

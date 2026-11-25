@@ -182,12 +182,22 @@ def _history_pairs(data: dict, lags=HISTORY_LAGS) -> list[tuple]:
     if "history_pairs" in data:
         return data["history_pairs"]
     reb = load("gfs_rebuilt")
-    e_all, d_all = reb["energy"].values.astype(float), reb["direction"].values.astype(float)
-    times, leads = reb["time"].values, list(reb["lead_hours"].values)
     nc = load("gfs_nowcast")
     assert list(nc["station"].values) == list(reb["station"].values)
-    e_nc, d_nc, nc_times = nc["energy"].values.astype(float), nc["direction"].values.astype(float), nc["valid_time"].values
-    it, il, ist = data["index"]
+    data["history_pairs"] = history_pairs_from(
+        reb["energy"].values.astype(float), reb["direction"].values.astype(float), reb["time"].values,
+        reb["lead_hours"].values, nc["energy"].values.astype(float), nc["direction"].values.astype(float),
+        nc["valid_time"].values, data["index"], lags)
+    return data["history_pairs"]
+
+
+def history_pairs_from(e_all, d_all, times, leads, e_nc, d_nc, nc_times, index, lags=HISTORY_LAGS) -> list[tuple]:
+    """The pairs of _history_pairs from arrays (also used for live forecasts, forecast/predict.py):
+        e_all, d_all    rebuilt spectra (time, lead_hours, station, freq) of the runs at issue `times` (sorted)
+        e_nc, d_nc      rebuilt nowcast spectra (valid_time, station, freq) at `nc_times` (sorted)
+        index           (it, il, ist) per data row into (time, lead_hours, station)"""
+    leads = list(leads)
+    it, il, ist = index
     lead = np.asarray(leads)[il]
     now = (e_all[it, il, ist], d_all[it, il, ist])
     pairs = []
@@ -209,7 +219,6 @@ def _history_pairs(data: dict, lags=HISTORY_LAGS) -> list[tuple]:
         use[use] &= np.isfinite(e_nc[jn[use], ist[use]]).all(1)
         e_prev[use], d_prev[use] = e_nc[jn[use], ist[use]], d_nc[jn[use], ist[use]]
         pairs.append((now, (e_prev, d_prev)))
-    data["history_pairs"] = pairs
     return pairs
 
 
