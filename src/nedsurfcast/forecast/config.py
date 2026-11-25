@@ -115,3 +115,4 @@ CHECKPOINT_DIR = cfg.ROOT / "checkpoints"
 GFSWAVE_LIVE_DIR = cfg.RAW_DIR / "gfswave_live"
 FORECAST_MODEL = "cnn-hlf"                    # name in forecast/models.MODELS, loaded from CHECKPOINT_DIR
 FORECAST_OUTPUT_DIR = FORECAST_DIR / "forecasts"   # forecast_YYYYMMDD_HHz.json + forecast_latest.json
+EXAMPLES_DIR = FORECAST_DIR / "examples"      # forecast/examples.py: best/worst corrected historical forecasts

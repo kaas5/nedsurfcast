@@ -184,15 +184,16 @@ def _round(a, decimals):
     return [None if not np.isfinite(v) else float(v) for v in a]
 
 
-def _summary(energy: np.ndarray, direction: np.ndarray, f: np.ndarray) -> dict:
+def spectrum_summary(energy: np.ndarray, direction: np.ndarray, f: np.ndarray, spread: np.ndarray = None) -> dict:
+    """One spectrum -> {energy, direction, hm0, partitions} as in the forecast JSON (module docstring).
+    spread (deg per bin, measured spectra only) gives the partitions a spread; without it spread is null."""
     e = energy[None]
     hm0 = {"total": band_hm0(e, f)[0]} | {band: band_hm0(e, f, lo, hi)[0] for band, (lo, hi) in PERIOD_BANDS.items()}
-    parts = partition_spectrum(f, energy, direction, None, **fcfg.BUOY_PARTITION_KWARGS)
-    keys = ("hs", "tp", "fp", "dir", "f_lo", "f_hi")
+    parts = partition_spectrum(f, energy, direction, spread, **fcfg.BUOY_PARTITION_KWARGS)
+    keys = ("hs", "tp", "fp", "dir", "spread", "f_lo", "f_hi")
     return {"energy": _round(energy, DECIMALS["energy"]), "direction": _round(direction, DECIMALS["direction"]),
             "hm0": dict(zip(hm0, _round(list(hm0.values()), DECIMALS["hm0"]))),
-            "partitions": [dict(zip(keys, _round([p[k] for k in keys], DECIMALS["partition"])), spread=None)
-                           for p in parts]}
+            "partitions": [dict(zip(keys, _round([p[k] for k in keys], DECIMALS["partition"]))) for p in parts]}
 
 
 def forecast(issue: dt.datetime, model_name: str = None, run_dir: Path = None, nowcast_dir: Path = None) -> dict:
@@ -218,8 +219,8 @@ def forecast(issue: dt.datetime, model_name: str = None, run_dir: Path = None, n
             "evaluated": name not in fcfg.TRAIN_ONLY_STATIONS,
             "forecast": [{"lead_hours": int(m["lead_hours"].iat[r]),
                           "valid_time": f"{issue + dt.timedelta(hours=int(m['lead_hours'].iat[r])):%Y-%m-%dT%H:%MZ}",
-                          "corrected": _summary(energy[r], direction[r], f),
-                          "gfs": _summary(data["gfs_energy"][r], data["gfs_direction"][r], f)}
+                          "corrected": spectrum_summary(energy[r], direction[r], f),
+                          "gfs": spectrum_summary(data["gfs_energy"][r], data["gfs_direction"][r], f)}
                          for r in rows]})
     return out
 
